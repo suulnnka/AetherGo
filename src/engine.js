@@ -465,6 +465,15 @@ export function searchBest(bd, side, opt = {}) {
 
   const root = newNode(-1, -1, side);
   initUntried(root, bd, 0);
+  /* 对方刚停一手:根节点也补上「停一手」选项(空点还多时 initUntried 不会自动加,
+   * 不补的话对方停一手后引擎只能继续填) */
+  if (opt.lastMove === PASS) {
+    let has = false;
+    for (let i = 0; i < N_UCOUNT[0]; i++) {
+      if (UNTRIED[N_USTART[0] + i] === PASS) { has = true; break; }
+    }
+    if (!has) { growUntried(uTop + 1); UNTRIED[uTop++] = PASS; N_UCOUNT[0]++; }
+  }
 
   /* 唯一选择:不必搜(与象棋引擎同款约定) */
   if (N_UCOUNT[root] === 1) {
