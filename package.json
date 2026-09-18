@@ -1,0 +1,23 @@
+{
+  "name": "aether-go",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "纯 JS 9×9 围棋(Go)引擎:完整规则(提子/禁自杀/单劫)+ 中国规则数子 + MCTS(UCT)搜索,零依赖、无 DOM",
+  "main": "src/engine.js",
+  "exports": {
+    ".": "./src/engine.js",
+    "./engine": "./src/engine.js"
+  },
+  "scripts": {
+    "test": "node test/engine-test.mjs",
+    "bench": "node bench/bench.mjs nps",
+    "moves": "node bench/bench.mjs moves 5000"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/suulnnka/AetherGo.git"
+  },
+  "keywords": ["go", "baduk", "weiqi", "围棋", "9x9", "engine", "mcts", "uct"],
+  "private": false
+}
