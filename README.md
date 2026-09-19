@@ -6,6 +6,27 @@
 **在线体验:** 打开 <https://suulnnka.github.io/AetherWebOS/> 启动「围棋」应用 —— 那里面跑的就是本引擎
 (默认高级档,窗口信息行实时显示演棋局数 / 胜率 / 耗时)。
 
+## 在线对弈页(GitHub Pages)
+
+本仓库自带一个**开箱即玩的对弈页**:布局与交互取自 WebOS 的围棋应用,
+同一份 Worker 契约接的也是本仓库的引擎 —— 纯 JS,MCTS(UCT)搜索 + 中国规则数子。每次推送由 GitHub Actions
+自动部署(`.github/workflows/deploy-pages.yml`):
+
+**<https://suulnnka.github.io/AetherGo/>**
+
+页面即仓库布局:`index.html`(根)+ `pages/`(页面资产),引擎入口在 `src/`、
+wasm 在 `wasm/`,全部按相对路径引用 —— 本地预览无需构建,仓库根起任意静态
+服务器即可:
+
+```bash
+python3 -m http.server 8000     # 仓库根起服
+# 打开 http://localhost:8000/
+```
+
+功能与 WebOS 应用一致:新对局 / 难度(引擎自报表)/ 人机或双人 / 换边 / 悔棋
+(停一手双停即终局数子,劫点与禁着点有提示),底栏左侧行棋状态、右侧实时引擎搜索信息。
+
+
 > v0.1:规则完整(提子 / 禁自杀 / 单劫 / 双停终局),搜索是**第一版 UCT + 纯随机演棋**,
 > 刻意做简单 —— 围棋分支因子大、静态评估难写,alpha-beta 在这里跑不动,
 > 蒙特卡洛树搜索是正路。后续路线见 [`docs/ROADMAP.md`](docs/ROADMAP.md)。
