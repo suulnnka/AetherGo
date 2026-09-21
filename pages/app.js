@@ -140,6 +140,17 @@ let levelIdx = 0;
 const aiSide = () => humanSide ^ 1;
 const lvName = () => levels[levelIdx]?.name ?? '—';
 
+/* 终局弹窗缓冲(600ms):终局画面先落地,给玩家一点反应时间再弹结算。
+ * 缓冲期里的新对局 / 悔棋 / 换边 / 人机切换都调 cancelEndDlg 取消 ——
+ * 不然这些操作之后还会蹦出上一局的结算框。 */
+const END_DLG_MS = 600;
+let endDlgTimer = 0;
+const cancelEndDlg = () => { clearTimeout(endDlgTimer); endDlgTimer = 0; };
+const popEndDlg = (show) => {
+  cancelEndDlg();
+  endDlgTimer = setTimeout(() => { endDlgTimer = 0; show(); }, END_DLG_MS);
+};
+
 const statusL = el('span', {}, '黑方行棋');
 const infoL = el('span', {
   class: 'mono', style: { fontSize: '11px' },
@@ -235,10 +246,11 @@ function endGame(score) {
   const win = score.margin > 0 ? '黑胜' : score.margin < 0 ? '白胜' : '和棋';
   const diff = Math.abs(score.margin).toFixed(1);
   const line = `终局 · ${win === '和棋' ? win : win + ' ' + diff + ' 目'}`;
-  showDialog({
+  /* 结算弹窗缓一拍:让玩家看清终局盘面再弹;缓冲期里的操作会取消它 */
+  popEndDlg(() => showDialog({
     title: '终局(双停)',
     message: `黑 ${score.black} · 白 ${score.white} —— ${win === '和棋' ? '和棋' : win + ' ' + diff + ' 目'}`,
-  });
+  }));
   statusL.textContent = line;
   setTitle('围棋 — 终局');
   toast('围棋:' + line);
@@ -353,6 +365,7 @@ function showInfo(d) {
 /* ---------- 工具栏动作 ---------- */
 function resetGame() {
   abortEngine();
+  cancelEndDlg();
   turn = BLACK; hist = []; lastMove = null;
   gameOver = false;
   board = new Array(81).fill(0);
@@ -367,6 +380,7 @@ function resetGame() {
 function doUndo() {
   if (!hist.length) return;
   abortEngine();
+  cancelEndDlg();
   let n = 1;
   if (vsAI && turn === humanSide && hist.length >= 2) n = 2;
   while (n-- > 0 && hist.length) hist.pop();
@@ -384,6 +398,7 @@ function doUndo() {
 /** 换边:与 AI 互换执子方。围棋不翻盘(坐标恒定) */
 function switchSide() {
   abortEngine();
+  cancelEndDlg();
   humanSide ^= 1;
   render();
   if (!gameOver && vsAI && turn === aiSide()) thinkAI();
@@ -405,6 +420,7 @@ const levelSel = el('select', {
 const aiBtn = el('button', {
   class: 'btn', title: '切换人机 / 双人对弈',
   onClick: (e) => {
+    cancelEndDlg();
     vsAI = !vsAI;
     e.currentTarget.replaceChildren(vsAI ? '人机' : '双人');
     sideBtn.disabled = !vsAI;                                 // 换边只对人机模式有意义
