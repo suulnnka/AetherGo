@@ -67,19 +67,26 @@ section('features-basic', () => {
   /* 无停着:全局 0~4 为 0;5/6/7/18 是贴目与规则常量,8~17 恒 0 */
   for (let k = 0; k <= 4; k++) eq(r.global[k], 0, `开局无停着:全局 ${k} = 0`);
   for (let k = 8; k <= 17; k++) eq(r.global[k], 0, `规则区全局 ${k} = 0`);
-  /* 停着历史:全局 0 置 1、通道 9 不置 */
+  /* 停着历史:全局 0 置 1、通道 9 不置(面积口径下孤立天元 = 全盘己方
+   * area,361−7.5 大胜 → 不触发 passing hacks,历史照常) */
   const bd2 = newBoard();
   make(bd2, sq(4, 4), BLACK); make(bd2, PASS, WHITE);
   const r2 = encodeFeatures(bd2, BLACK, { recentMoves: [sq(4, 4), PASS] });
-  eq(r2.global[0], 1, '上一手停着 → 全局 0 = 1');
+  eq(r2.global[0], 1, '上一手停着(优势)→ 全局 0 = 1');
   eq(r2.spatial[9 * N2], 0, '停着不进空间通道');
   eq(r2.spatial[10 * N2 + sq(4, 4)], 1, '再前一手的落点进通道 10');
   eq(r2.global[14], 1, '上一手停着 → passWouldEndPhase = 1');
-  /* 双停(终局):只保留 1 手历史 */
+  /* passing hacks(GTP 口径,nninputs.cpp:2046):停一手会终局且此刻
+   * 面积数子+贴目非胜 → 全隐历史、全局 0/14 均不置(同盘面白视角) */
+  const r2s = encodeFeatures(bd2, WHITE, { recentMoves: [sq(4, 4), PASS] });
+  eq(r2s.global[0], 0, '劣势停着(passing hacks)→ 全局 0 抑制');
+  eq(r2s.spatial[10 * N2 + sq(4, 4)], 0, '劣势停着:历史全隐 → 通道 10 为 0');
+  eq(r2s.global[14], 0, '劣势停着 → passWouldEndPhase 抑制');
+  /* 双停(终局):白劣势 → 同样抑制;历史全隐 */
   const bd3 = newBoard();
   make(bd3, sq(4, 4), BLACK); make(bd3, PASS, WHITE); make(bd3, PASS, BLACK);
   const r3 = encodeFeatures(bd3, WHITE, { recentMoves: [sq(4, 4), PASS, PASS] });
-  eq(r3.global[0], 1, '终局:保留最后一手(停着)→ 全局 0 = 1');
+  eq(r3.global[0], 0, '终局(白劣势):passing hacks → 全局 0 = 0');
   eq(r3.global[1], 0, '终局:更早的历史被截断 → 全局 1 = 0');
 });
 
@@ -159,9 +166,11 @@ section('features-invariants', () => {
   const stones = [...bd].filter((v) => v !== 0).length;
   eq(chSum(a.spatial, 1) + chSum(a.spatial, 2), stones, '通道 1+2 = 盘上子数');
   eq(a.spatial.length, 22 * N2, '空间缓冲长度 = 22 × 361');
-  /* 尾随停着:全局 0=1 且 passWouldEndPhase=1 */
-  eq(a.global[0], 1, '尾随停着 → 全局 0');
-  eq(a.global[14], 1, '尾随停着 → 全局 14');
+  /* 尾随停着:此刻面积数子胜 → 全局 0/14 置 1;劣势则 passing hacks 抑制 */
+  const mine = chSum(a.spatial, 18), opp = chSum(a.spatial, 19);
+  const winning = mine - opp - 7.5 > 0;   /* 黑视角 selfKomi = −7.5 */
+  eq(a.global[0], winning ? 1 : 0, '尾随停着 → 全局 0(胜可见/负抑制)');
+  eq(a.global[14], winning ? 1 : 0, '尾随停着 → 全局 14(同上)');
 });
 
 /* ---------- 执行 ---------- */

@@ -212,6 +212,23 @@ function resolvePrevReplay(bd, moves, numIncluded, initialSide) {
   return { prev1, prev2 };
 }
 
+/* ==================== passing hacks 判定(nninputs.cpp:2046 语义) ====================
+ * KataGo GTP/分析常开 enablePassingHacks:停一手会终局、且此刻面积数子 + 贴目
+ * 非胜(finalScorePla ≤ 0)→ 全隐历史(maxHistory=0)、不置 passWouldEndGame 位
+ * —— 不让网络在劣势时「提前接受终局少输」,继续在盘上争取;训练数据
+ * (selfplay)不带此 hack,属推理期口径,与 KataGo GTP 行为对齐。 */
+function passEndSuppressed(bd, side, komi) {
+  const area = calculateArea(bd);
+  const mineV = side + 1;
+  let boardScorePla = 0;
+  for (let p = 0; p < N2; p++) {
+    if (area[p] === mineV) boardScorePla++;
+    else if (area[p] !== 0) boardScorePla--;
+  }
+  const selfKomi = side === WHITE ? komi : -komi;
+  return boardScorePla + selfKomi <= 0;
+}
+
 /* ==================== 编码入口 ==================== */
 
 /* 通道 6 复用掩码(避免每次编码分配) */
@@ -233,19 +250,25 @@ export function encodeFeatures(bd, side, opts = {}) {
   sp.fill(0); gl.fill(0);
   const moves = opts.recentMoves ?? [];
 
-  /* 历史:尾随停着决定收录量与全局 14(friendlyPassOk=false:不抑制) */
+  /* 历史:尾随停着决定收录量与全局 14;passing hacks(劣势且停一手终局)全隐 */
   let trailing = 0;
   for (let i = moves.length - 1; i >= 0 && moves[i] === PASS; i--) trailing++;
   const passWouldEndGame = trailing >= 1;
   let maxHistory = 5;
-  if (passWouldEndGame && trailing >= 2) maxHistory = 1;   // isGameFinished:只留最后一手
+  let suppressPassEnd = false;
+  if (passWouldEndGame) {
+    if (passEndSuppressed(bd, side, opts.komi ?? KOMI)) {
+      maxHistory = 0;                       // passing hacks:全隐历史
+      suppressPassEnd = true;
+    } else if (trailing >= 2) maxHistory = 1;   // isGameFinished:只留最后一手
+  }
   let numIncluded = 0;
   if (maxHistory > 0 && moves.length > 0) {
     numIncluded = Math.min(maxHistory, moves.length);
   }
 
   const { prev1, prev2 } = resolvePrevRing(bd, numIncluded);
-  return encodeCore(bd, side, opts, moves, numIncluded, passWouldEndGame, sp, gl, prev1, prev2);
+  return encodeCore(bd, side, opts, moves, numIncluded, passWouldEndGame, sp, gl, prev1, prev2, suppressPassEnd);
 }
 
 /**
@@ -263,17 +286,23 @@ export function encodeFeaturesReplay(bd, side, opts = {}) {
   for (let i = moves.length - 1; i >= 0 && moves[i] === PASS; i--) trailing++;
   const passWouldEndGame = trailing >= 1;
   let maxHistory = 5;
-  if (passWouldEndGame && trailing >= 2) maxHistory = 1;
+  let suppressPassEnd = false;
+  if (passWouldEndGame) {
+    if (passEndSuppressed(bd, side, opts.komi ?? KOMI)) {
+      maxHistory = 0;
+      suppressPassEnd = true;
+    } else if (trailing >= 2) maxHistory = 1;
+  }
   let numIncluded = 0;
   if (maxHistory > 0 && moves.length > 0) {
     numIncluded = Math.min(maxHistory, moves.length);
   }
 
   const { prev1, prev2 } = resolvePrevReplay(bd, moves, numIncluded, opts.initialSide ?? BLACK);
-  return encodeCore(bd, side, opts, moves, numIncluded, passWouldEndGame, sp, gl, prev1, prev2);
+  return encodeCore(bd, side, opts, moves, numIncluded, passWouldEndGame, sp, gl, prev1, prev2, suppressPassEnd);
 }
 
-function encodeCore(bd, side, opts, moves, numIncluded, passWouldEndGame, sp, gl, prev1, prev2) {
+function encodeCore(bd, side, opts, moves, numIncluded, passWouldEndGame, sp, gl, prev1, prev2, suppressPassEnd = false) {
   const mineV = side + 1, oppV = 2 - side;
   const komi = opts.komi ?? KOMI;
 
@@ -333,7 +362,7 @@ function encodeCore(bd, side, opts, moves, numIncluded, passWouldEndGame, sp, gl
   gl[5] = selfKomi / 20;
   gl[6] = 1; gl[7] = 0.5;                                  // KO_POSITIONAL
   /* gl[8..13] 恒 0:禁自杀 / 面积计分 / 无税 / 无 encore */
-  gl[14] = passWouldEndGame ? 1 : 0;                       // passWouldEndPhase(friendlyPassOk=false 不抑制)
+  gl[14] = (passWouldEndGame && !suppressPassEnd) ? 1 : 0; // passWouldEndPhase;passing hacks 抑制时不置(nninputs.cpp suppressPassWouldEndPhase)
   /* gl[15..17] 恒 0:无让子优势 / 无 button */
   /* gl[18]:贴目奇偶三角波(面积计分) */
   {

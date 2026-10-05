@@ -493,7 +493,10 @@ export async function nnSearchBest(bd, side, opt = {}) {
       let totalW = 0, pMass = 0;
       for (const ch of cur.children) {
         if (!ch.node) continue;                   // KataGo policyProbMassVisited:仅已访问子
-        totalW += ch.node.weight;
+        /* totalChildWeight 同口径:累加边分摊权重(getChildWeight),非子节点全局
+         * 权重 —— 转置共享子不得重复计入本父的探索预算(searchexplorehelpers
+         * 累加的就是 getChildWeight(edgeVisits)) */
+        totalW += ch.node.weight * (ch.edgeVisits / Math.max(ch.node.visits, 1));
         pMass += Math.max(ch.prior, 0);
       }
       const cpuct = CPUCT + CPUCT_LOG * Math.log((totalW + CPUCT_BASE) / CPUCT_BASE);
