@@ -492,7 +492,8 @@ export async function nnSearchBest(bd, side, opt = {}) {
     while (!cur.terminal && cur.nn && cur.children) {
       let totalW = 0, pMass = 0;
       for (const ch of cur.children) {
-        totalW += ch.node ? ch.node.weight : 0;
+        if (!ch.node) continue;                   // KataGo policyProbMassVisited:仅已访问子
+        totalW += ch.node.weight;
         pMass += Math.max(ch.prior, 0);
       }
       const cpuct = CPUCT + CPUCT_LOG * Math.log((totalW + CPUCT_BASE) / CPUCT_BASE);
