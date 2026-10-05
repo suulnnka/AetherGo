@@ -15,7 +15,7 @@ env["LD_LIBRARY_PATH"] = "/home/a/go/tools/onnxruntime-linux-x64-1.30.0/lib"
 
 p = subprocess.Popen(
     [KATAGO, "gtp", "-config", CFG, "-config", "ae_rules.cfg", "-model", MODEL,
-     "-override-config", "numSearchThreads=1,maxVisits=%d,nnMaxBatchSize=1,ponderingEnabled=false,"
+     "-override-config", "numSearchThreads=1,maxVisits=%d,nnMaxBatchSize=1,ponderingEnabled=false,wideRootNoise=0,"
      "allowResignation=false,logAllGTPCommunication=false,logDir=/tmp/kbench/logs,onnxProvider=cpu" % VISITS],
     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=1, env=env,
     cwd="/home/a/go/trainrun")

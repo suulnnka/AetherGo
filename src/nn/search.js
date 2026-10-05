@@ -1,6 +1,14 @@
 /* ============================================================
  * AetherGo NN 版异步 PUCT 搜索 —— v4:图搜索(useGraphSearch,最终选点/效用同 v3)
  *
+ * == v4.3(2026-10-06):搜索随机对称(nnEvaluator 同款)==
+ *   - 每次评估随机取 8 对称之一:spatial 点映射通道整体置换(等价变换局面
+ *     后编码),policy/ownership 逆置换回恒等系;值输出与 global 不变量。
+ *     模型对称增广训练下,变换输入评估≈变换输出,残差即去相关评估噪声,
+ *     打破确定性访问锁定(P7 集中度:C3:57 vs KataGo 运行带 23-35)。
+ *   - 评估缓存键取变换后特征(8 子缓存,同输入同输出不变量保持);
+ *     opt.symmetry===false 关闭(位置敏感桩测试),opt.rngSeed 可复现。
+ *
  * == v4.2(2026-10-06):重算式节点统计(KataGo recomputeNodeStats 移植)==
  *   - 节点统计不再沿路径累积叶值:每次回传后自叶向根逐节点从「子边统计 +
  *     自身 NN 评估」重算 —— 子权重 = getChildWeight(边分摊),good 子按先验序
@@ -108,6 +116,43 @@ const ENABLE_CATCHUP = false;
 
 const TWO_OVER_PI = 2 / Math.PI;
 const SQRT_AREA = Math.sqrt(N2);
+
+/* ==================== 搜索随机对称(KataGo nnEvaluator 同款) ====================
+ * 每次评估随机取 8 对称之一:spatial 全通道按 SYM8[s] 置换(所有通道均为盘面
+ * 点映射,几何置换等价于「变换局面后编码」—— nninputs.cpp 对称同口径),
+ * global 与值输出(winLoss/scoreMean/policyPass)为不变量;policy/ownership
+ * 按逆置换(dst[p] = src[perm[p]])还原到恒等坐标系。模型经对称增广训练,
+ * 对变换输入的评估 ≈ 变换输出,残差即去相关评估噪声 —— 打破确定性访问
+ * 锁定(2026-10-06 P7 集中度:C3:57 vs KataGo 运行带 23-35,KataGo 侧即靠
+ * 此噪声维持访问分散,恒等对称的引擎则单点锁死)。
+ * 评估缓存键取变换后特征(同变换同键才命中,「同输入必同输出」不变量保持,
+ * 等效 8 个子缓存)。opt.symmetry === false 关闭(位置敏感桩测试用);
+ * opt.rngSeed 固定种子可复现(测试)。SYM8 定义于文件尾,调用期引用无碍。 */
+let symRng = ((Date.now() ^ (Math.random() * 0x7fffffff)) >>> 0) || 0x9e3779b9;
+function nextSym() {
+  let x = symRng;
+  x ^= (x << 13) >>> 0; x ^= x >>> 17; x ^= (x << 5) >>> 0;
+  symRng = x >>> 0;
+  return x & 7;
+}
+function permuteSpatial(src, perm, dst) {
+  const ch = (src.length / N2) | 0;
+  for (let c = 0; c < ch; c++) {
+    const off = c * N2;
+    for (let p = 0; p < N2; p++) dst[off + perm[p]] = src[off + p];
+  }
+  return dst;
+}
+function unpermuteOut(out, perm) {
+  const policy = new Float32Array(N2);
+  for (let p = 0; p < N2; p++) policy[p] = out.policy[perm[p]];
+  const ownership = out.ownership ? (() => {
+    const o = new Float32Array(N2);
+    for (let p = 0; p < N2; p++) o[p] = out.ownership[perm[p]];
+    return o;
+  })() : out.ownership;
+  return { ...out, policy, ownership };
+}
 
 /* ==================== ScoreValue JS 版(nninputs.cpp 权威) ==================== */
 
@@ -735,9 +780,16 @@ export async function nnSearchBest(bd, side, opt = {}) {
 
   /* ---- 主循环前置:根评估(λ=0.2)→ recentScoreCenter + 根先验 + 环快照 ---- */
   let rootOwnPre = null;                     // 根评估 ownership(行棋方视角 pretanh),终选 pass 守门用
+  const useSym = opt.symmetry !== false;
+  if (opt.rngSeed !== undefined) symRng = (opt.rngSeed >>> 0) || 1;
   {
     const f = encodeFeatures(bd, side, { recentMoves: rootRecent, komi, outSpatial: spBuf, outGlobal: glBuf });
-    const [out] = await evalBatch([{ spatial: f.spatial, global: f.global, optimism: ROOT_OPTIMISM }]);
+    const rootSym = useSym ? nextSym() : 0;
+    const rootSpatial = rootSym
+      ? permuteSpatial(f.spatial, SYM8[rootSym], new Float32Array(f.spatial.length))
+      : f.spatial;
+    const [out0] = await evalBatch([{ spatial: rootSpatial, global: f.global, optimism: ROOT_OPTIMISM }]);
+    const out = rootSym ? unpermuteOut(out0, SYM8[rootSym]) : out0;
     rootOwnPre = out.ownership ?? null;
     const sem = semOf(out, side);
     const expectedScore = (root.visits > 0 && root.weight > 0)
@@ -784,7 +836,9 @@ export async function nnSearchBest(bd, side, opt = {}) {
   const applyBatch = (pending, outs) => {
     nnCalls++;
     for (let i = 0; i < pending.length; i++) {
-      const p = pending[i], out = outs[i];
+      const p = pending[i];
+      let out = outs[i];
+      if (p.sym) out = unpermuteOut(out, SYM8[p.sym]);   // 逆置换回恒等坐标系
       removeVirtualLoss(p.path);
       const toks = remakePath(p.path);
       expand(p.node, out.policy, out.policyPass, bd, p.legalMoves);
@@ -855,7 +909,13 @@ export async function nnSearchBest(bd, side, opt = {}) {
       const f = encodeFeatures(bd, e.node.side, {
         recentMoves: e.recent, komi, outSpatial: spBuf, outGlobal: glBuf,
       });
-      const key = fevalKey(f.spatial, f.global);
+      /* 随机对称:采样 → spatial 置换(拷贝,pending 跨异步持有)→ 键取变换后
+       * 特征(同变换同键才命中缓存) */
+      const sym = useSym ? nextSym() : 0;
+      const spatial = sym
+        ? permuteSpatial(f.spatial, SYM8[sym], new Float32Array(f.spatial.length))
+        : Float32Array.from(f.spatial);
+      const key = fevalKey(spatial, f.global);
       const cached = lookupEval(key);
       if (cached) {
         cacheHits++;
@@ -870,9 +930,9 @@ export async function nnSearchBest(bd, side, opt = {}) {
         continue;
       }
       pending.push({
-        node: e.node, path: e.path, key,
+        node: e.node, path: e.path, key, sym,
         legalMoves: genLegal(bd, e.node.side),
-        spatial: Float32Array.from(f.spatial), global: Float32Array.from(f.global),
+        spatial, global: Float32Array.from(f.global),
       });
       applyVirtualLoss(e.path);
       for (let i = e.path.length - 1; i >= 1; i--) unmake(bd, e.path[i].move, e.path[i].tok);

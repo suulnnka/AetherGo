@@ -42,7 +42,7 @@ function makeStub({ hot = [], passLogit = -20, winLoss = 0.3 } = {}) {
   };
 }
 const search = (bd, opts) => nnSearchBest(bd, BLACK, {
-  session: makeStub(opts), visits: 120, batch: 4, reuseTree: false, allowResign: false, debug: true, ...opts,
+  session: makeStub(opts), visits: 120, batch: 4, symmetry: false, reuseTree: false, allowResign: false, debug: true, ...opts,
 });
 
 /* ==================== 1. 无用着剪枝:真眼 / 假眼 ==================== */
@@ -74,17 +74,17 @@ const search = (bd, opts) => nnSearchBest(bd, BLACK, {
    * 都直接当选,何时停一手交给网络值 + 双停终局值。 */
   const hot = [[sq(9, 9), 20], [sq(9, 10), 19]];
   const on = await nnSearchBest(duel, BLACK, {
-    session: makeStub({ hot, passLogit: 25 }), visits: 60, batch: 4,
+    session: makeStub({ hot, passLogit: 25 }), visits: 60, batch: 4, symmetry: false,
     reuseTree: false, allowResign: false,
   });
   check('6d 单官在盘时强 pass 先验也当选(面积计分不压制)', on.move === PASS, `move=${on.move}`);
   const clean = await nnSearchBest(tenji, BLACK, {
-    session: makeStub({ hot, passLogit: 25 }), visits: 60, batch: 4,
+    session: makeStub({ hot, passLogit: 25 }), visits: 60, batch: 4, symmetry: false,
     reuseTree: false, allowResign: false,
   });
   check('6f 无单官时强 pass 先验当选', clean.move === PASS, `move=${clean.move}`);
   const noPass = await nnSearchBest(duel, BLACK, {
-    session: makeStub({ hot }), visits: 60, batch: 4,
+    session: makeStub({ hot }), visits: 60, batch: 4, symmetry: false,
     reuseTree: false, allowResign: false,
   });
   check('6g 无 pass 先验时照常下棋盘点着法', noPass.move !== PASS, `move=${noPass.move}`);
@@ -101,11 +101,11 @@ const search = (bd, opts) => nnSearchBest(bd, BLACK, {
     });
   } });
   const guarded = await nnSearchBest(duel, BLACK, {
-    session: ownStub(0.5), visits: 60, batch: 4, reuseTree: false, allowResign: false,
+    session: ownStub(0.5), visits: 60, batch: 4, symmetry: false, reuseTree: false, allowResign: false,
   });
   check('6h 可下点存在时守门压掉强 pass 先验', guarded.move !== PASS, `move=${guarded.move}`);
   const freePass = await nnSearchBest(duel, BLACK, {
-    session: ownStub(-2.5), visits: 60, batch: 4, reuseTree: false, allowResign: false,  /* pretanh -2.5 → tanh≈-0.99 */
+    session: ownStub(-2.5), visits: 60, batch: 4, symmetry: false, reuseTree: false, allowResign: false,  /* pretanh -2.5 → tanh≈-0.99 */
   });
   check('6h2 全盘对方铁地时守门放行 pass', freePass.move === PASS, `move=${freePass.move}`);
 }
@@ -115,11 +115,11 @@ const search = (bd, opts) => nnSearchBest(bd, BLACK, {
   const sess = makeStub({ hot: [[sq(9, 9), 5], [sq(9, 10), 4]] });
   const bd = newBoard();
   const r1 = await nnSearchBest(bd, BLACK, {
-    session: sess, visits: 120, batch: 4, reuseTree: false, allowResign: false,
+    session: sess, visits: 120, batch: 4, symmetry: false, reuseTree: false, allowResign: false,
   });
   /* 第二次搜同一局面:模块级缓存命中,推理调用显著变少(根叶子零推理) */
   const r2 = await nnSearchBest(bd, BLACK, {
-    session: sess, visits: 120, batch: 4, reuseTree: false, allowResign: false,
+    session: sess, visits: 120, batch: 4, symmetry: false, reuseTree: false, allowResign: false,
   });
   check('5a 二次搜索命中评估缓存', r2.cacheHits > 0, `hits=${r2.cacheHits}`);
   check('5b 缓存命中减少推理调用', r2.nnCalls < r1.nnCalls, `${r1.nnCalls} → ${r2.nnCalls}`);
@@ -165,7 +165,7 @@ const search = (bd, opts) => nnSearchBest(bd, BLACK, {
     },
   };
   const r = await nnSearchBest(newBoard(), BLACK, {
-    session, visits: 40, batch: 4, reuseTree: false, debug: true,
+    session, visits: 40, batch: 4, symmetry: false, reuseTree: false, debug: true,
   });
   check('7a 根评估带 λ=0.2(rootPolicyOptimism)', seen[0] && seen[0][0] === 0.2, JSON.stringify(seen[0]));
   check('7b 叶子评估 λ 缺省 1(树内)', seen.slice(1).every((a) => a.every((v) => v === undefined || v === 1)),
@@ -177,7 +177,7 @@ const search = (bd, opts) => nnSearchBest(bd, BLACK, {
       return items.map(() => ({ policy: mkPolicy(), policyPass: -20, winLoss: 0.3 }));
     },
   };
-  const r2 = await nnSearchBest(newBoard(), BLACK, { session: session2, visits: 40, batch: 4, reuseTree: false });
+  const r2 = await nnSearchBest(newBoard(), BLACK, { session: session2, visits: 40, batch: 4, symmetry: false, reuseTree: false });
   check('7d 无 score 头退化为纯胜率效用(老网口径)', r2.move === sq(9, 9), String(r2.move));
 }
 
@@ -187,12 +187,12 @@ const search = (bd, opts) => nnSearchBest(bd, BLACK, {
   clearEvalCache();
   const sessA = makeStub({ hot: [[sq(9, 9), 5], [sq(9, 10), 4]] });
   const bdA = newBoard();
-  const t1 = await nnSearchBest(bdA, BLACK, { session: sessA, visits: 120, batch: 4, allowResign: false });
-  const t2 = await nnSearchBest(bdA, BLACK, { session: sessA, visits: 120, batch: 4, allowResign: false });
+  const t1 = await nnSearchBest(bdA, BLACK, { session: sessA, visits: 120, batch: 4, symmetry: false, allowResign: false });
+  const t2 = await nnSearchBest(bdA, BLACK, { session: sessA, visits: 120, batch: 4, symmetry: false, allowResign: false });
   check('8a 跨手子图复用:第二次思考推理大减', t2.nnCalls < t1.nnCalls, `${t1.nnCalls} → ${t2.nnCalls}`);
   /* 单次搜索(冷表)的可达节点 ≤ 访问数 + 根:每次访问至多建一个新节点 */
   clearEvalCache();
-  const t3 = await nnSearchBest(newBoard(), BLACK, { session: makeStub({ hot: [[sq(9, 9), 5], [sq(9, 10), 4]] }), visits: 80, batch: 4, allowResign: false });
+  const t3 = await nnSearchBest(newBoard(), BLACK, { session: makeStub({ hot: [[sq(9, 9), 5], [sq(9, 10), 4]] }), visits: 80, batch: 4, symmetry: false, allowResign: false });
   check('8b GC:节点表以可达子图为界', __nodeTableSize() <= 80 + 2, `size=${__nodeTableSize()} visits=${t3.visits}`);
   check('8c 转置安全:访问用满且可复现', t2.visits === 120 && t2.move === t1.move, `${t2.visits}/${t2.move}`);
 
@@ -222,7 +222,7 @@ const search = (bd, opts) => nnSearchBest(bd, BLACK, {
     });
   } };
   const bdB = newBoard();
-  const tr = await nnSearchBest(bdB, BLACK, { session: posAware, visits: 80, batch: 4, allowResign: false });
+  const tr = await nnSearchBest(bdB, BLACK, { session: posAware, visits: 80, batch: 4, symmetry: false, allowResign: false });
   check('8d 转置合并:双星状态跨路径只评估一次', oppBothStars === 1, `evals=${oppBothStars}`);
   check('8d2 节点表规模 ≤ 访问数+根', __nodeTableSize() <= tr.visits + 1 && tr.visits === 80,
     `size=${__nodeTableSize()} visits=${tr.visits}`);
@@ -252,7 +252,7 @@ const search = (bd, opts) => nnSearchBest(bd, BLACK, {
     clearEvalCache();
     const sess = mkSlowStub(ms);
     const r = await nnSearchBest(newBoard(), BLACK, {
-      session: sess, visits, batch, allowResign: false, temperature: 0,
+      session: sess, visits, batch, symmetry: false, allowResign: false, temperature: 0,
     });
     return { ...r, rows: sess.rows };
   };
@@ -278,7 +278,7 @@ const search = (bd, opts) => nnSearchBest(bd, BLACK, {
       return items.map(() => ({ policy: p, policyPass: -20, winLoss: 0.3 }));
     } };
     const r = await nnSearchBest(newBoard(), BLACK, {
-      session: sess, visits: 80, maxBatch: 8, allowResign: false,
+      session: sess, visits: 80, maxBatch: 8, symmetry: false, allowResign: false,
     });
     check('9e 批上限按预算压 stale(≤ 预算/16)', maxRows <= 5 && r.visits === 80,
       `maxRows=${maxRows} visits=${r.visits}`);
@@ -306,6 +306,37 @@ const search = (bd, opts) => nnSearchBest(bd, BLACK, {
   };
   const t = await calibrateMaxBatch(flat, { iters: 2 });
   check('10e 计时校准:固定开销主导选最大批', t === 32, `got=${t}`);
+}
+
+/* ==================== 11. 搜索随机对称(nnEvaluator 同款) ====================
+ * v4.3:每次评估随机取 8 对称之一(spatial 置换发送,policy/ownership 逆置换
+ * 还原)。等变性往返检验:桩从收到的(已变换)spatial 通道 1(己方子)定位
+ * 孤子标记 q0,回 policy 热点于 R180(q0);引擎逆置换后恒等系热点 =
+ * σ⁻¹·R180·σ(p0) = R180(p0) —— R180 是 D4 群中心,共轭不变 —— 无论采样
+ * 到哪个对称,选点必须落在固定空点,以此验证置换/逆置换方向正确。
+ * rngSeed 固定时评估序列确定 → 变换后特征键复现 → 二次搜索命中缓存。 */
+{
+  const p0 = sq(3, 3), pT = 360 - p0;
+  const symStub = () => ({ async evalBatch(items) {
+    return items.map((r) => {
+      const policy = new Float32Array(N2).fill(-20);
+      let q0 = -1;
+      for (let p = 0; p < N2; p++) if (r.spatial[N2 + p] > 0.5) { q0 = p; break; }
+      if (q0 >= 0) policy[360 - q0] = 6;
+      return { policy, policyPass: -20, winLoss: 0.3 };
+    });
+  } });
+  const bdS = boardFrom([[3, 3, 'X']]);
+  const r1 = await nnSearchBest(bdS, BLACK, {
+    session: symStub(), visits: 60, symmetry: true, reuseTree: false, allowResign: false, rngSeed: 20261006,
+  });
+  const r2 = await nnSearchBest(bdS, BLACK, {
+    session: symStub(), visits: 60, symmetry: true, reuseTree: false, allowResign: false, rngSeed: 20261006,
+  });
+  check('11a 等变往返:任意对称下选点落 R180(标记子)', r1.move === pT && r2.move === pT, `${r1.move}/${r2.move} want ${pT}`);
+  check('11b rngSeed 固定可复现(选点/访问一致;缓存命中替代推理属预期)',
+    r1.move === r2.move && r1.visits === r2.visits, `${r1.move}/${r2.move} ${r1.visits}/${r2.visits}`);
+  check('11c 变换特征键命中缓存', r2.cacheHits > 0, `hits=${r2.cacheHits}`);
 }
 
 console.log(failed ? `\n${failed} 项失败` : '\n全部通过');
