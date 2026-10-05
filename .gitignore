@@ -1,0 +1,36 @@
+# ===== AetherGo .gitignore =====
+# 本仓库即站点:无构建链、零依赖(GitHub Pages 原样引用)。
+# 原则:发布物(onnx 模型、页面、引擎、训练脚本)进库;训练产物/数据/日志不进。
+
+# --- 依赖与环境(本仓库零依赖,以下出现即异常;防手滑) ---
+node_modules/
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# --- 训练侧产物(训练在本地 KataGo 工具链,/home/a/go/*,永不进库) ---
+*.npz
+*.npy
+*.pt
+*.pth
+*.bin
+*.bin.gz
+*.jsonl
+data/
+data_log/
+export_bin/
+nnlog*/
+gtp_logs/
+
+# --- 日志 / 临时 / 系统文件 ---
+*.log
+*.tmp
+*.bak
+*~
+.DS_Store
+Thumbs.db
+
+# --- 说明 ---
+# models/*.onnx 不忽略:模型是发布资产(在线对弈页按相对路径加载),
+# 按「仅支持一种模型」的产品边界,models/ 内始终只保留当前在役的那一个。

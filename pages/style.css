@@ -17,11 +17,11 @@
    * 棋盘是固定像素的,窗体的最小尺寸也直接由它推出来(见 --win-min-*),
    * 浏览器窗口再小棋盘也不会被缩到看不清。 */
   --win-w: 620px;
-  --win-h: 640px;
-  --cs: 52px;                                /* 格距:与 app.js 的 CS 常量必须一致 */
-  --pad: 26px;                               /* 棋盘边距 */
-  /* 棋盘自然尺寸 + fitBoard() 的四周留白 24(见 app.js) */
-  --board-w: calc(var(--cs) * 8 + var(--pad) * 2 + 24px);
+  --win-h: 724px;
+  --cs: 30px;                                /* 格距:与 app.js 的 CS 常量必须一致 */
+  --pad: 24px;                               /* 棋盘边距 */
+  /* 棋盘自然尺寸(19 路 = 格距 × 18)+ fitBoard() 的四周留白 24(见 app.js) */
+  --board-w: calc(var(--cs) * 18 + var(--pad) * 2 + 24px);
   --board-h: var(--board-w);
   /* 窗体最小 = 棋盘 + 窗内铬(工具栏 44 + 状态栏 26)+ 窗框(标题栏 38 + 上下边框 2) */
   --win-min-w: calc(var(--board-w) + 2px);
@@ -213,8 +213,8 @@ html[data-theme="light"] .page-foot { color: rgba(30, 42, 80, 0.55); }
   /* --cs / --pad 都在 :root(棋盘尺寸与窗体最小尺寸共用一份) */
   position: relative;
   flex: none;
-  width: calc(var(--cs) * 8 + var(--pad) * 2);
-  height: calc(var(--cs) * 8 + var(--pad) * 2);
+  width: calc(var(--cs) * 18 + var(--pad) * 2);
+  height: calc(var(--cs) * 18 + var(--pad) * 2);
   border-radius: 10px;
   background: linear-gradient(160deg, #f6e3bd, #e2c288 60%, #d7b478);
   box-shadow: inset 0 0 26px rgba(120, 80, 20, 0.35), 0 12px 34px rgba(0, 0, 0, 0.5);
@@ -229,11 +229,11 @@ html[data-theme="light"] .page-foot { color: rgba(30, 42, 80, 0.55); }
 }
 .go-lines { position: absolute; inset: 0; width: 100%; height: 100%; }
 .go-line { stroke: #7c5220; stroke-width: 1.3; fill: none; }
-/* 星位(9 路五个) */
+/* 星位(19 路九个) */
 .go-star { fill: #7c5220; }
-/* 边缘坐标:列 A~J(跳过 I)、行 1~9,给「上一手 D4」一个参照 */
+/* 边缘坐标:列 A~T(跳过 I)、行 1~19,给「上一手 Q16」一个参照 */
 .go-coord {
-  fill: #7c5220; opacity: 0.55; font-size: 11px;
+  fill: #7c5220; opacity: 0.55; font-size: 9px;
   font-family: var(--mono, monospace);
   text-anchor: middle; dominant-baseline: middle;
 }
@@ -298,6 +298,25 @@ html[data-theme="light"] .page-foot { color: rgba(30, 42, 80, 0.55); }
   to { transform: scale(1); }
 }
 
+/* 数子模式:可点的棋子(手型光标)+ 被判死的子(降透明 + 红圈) */
+.go-pt.countable { cursor: pointer; }
+.go-stone.dead {
+  opacity: 0.42;
+  outline: 2px solid rgba(225, 55, 55, 0.75);
+  outline-offset: -2px;
+}
+/* 形势判断覆盖层(Lizzie/KaTrain 同款方块热图):
+ * 方块画在交叉点正中,颜色 = 归属方;大小与深浅由 JS 按 |ownership| 内联设置 */
+.go-own {
+  position: absolute; left: 50%; top: 50%;
+  transform: translate(-50%, -50%);
+  border-radius: 2px;
+  box-sizing: border-box;
+  pointer-events: none;
+}
+.go-own.b { background: #0b1220; border: 1px solid rgba(248, 250, 252, 0.65); }
+.go-own.w { background: #f8fafc; border: 1px solid rgba(15, 23, 42, 0.6); }
+
 /* ============ 对话框 / 吐司(webos 系统对话框与通知同族)============ */
 dialog#dlg {
   border: 0; padding: 0; background: none;
@@ -321,7 +340,7 @@ dialog#dlg::backdrop { background: rgba(5, 9, 20, 0.38); backdrop-filter: blur(1
   padding: 18px;
 }
 .dlg-title { font-size: 15px; font-weight: 700; margin-bottom: 10px; }
-.dlg-msg { font-size: 13px; color: var(--text-2); line-height: 1.6; }
+.dlg-msg { font-size: 13px; color: var(--text-2); line-height: 1.6; white-space: pre-line; }
 .dlg-foot { display: flex; justify-content: flex-end; margin-top: 16px; }
 
 #toasts {

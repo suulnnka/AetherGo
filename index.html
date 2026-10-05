@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="description" content="AetherGo 在线围棋对弈(9×9):完整规则(提子/禁自杀/单劫)、中国规则数子、多档 AI 难度、悔棋">
+<meta name="description" content="AetherGo 在线围棋对弈(19×19,WebGPU):完整规则(提子/禁自杀/单劫)、中国规则数子(可手改死子)、形势判断、多档 AI 难度(按访问数)、悔棋">
 <title>围棋 · AetherGo</title>
 <link rel="stylesheet" href="./pages/style.css">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23e2c288'/%3E%3Ccircle cx='11' cy='11' r='7' fill='%231f2937'/%3E%3Ccircle cx='22' cy='22' r='7' fill='%23fff'/%3E%3C/svg%3E">
@@ -33,6 +33,16 @@
     <div class="dlg-title" id="dlgTitle"></div>
     <div class="dlg-msg" id="dlgMsg"></div>
     <div class="dlg-foot"><button class="btn primary" id="dlgOk">确定</button></div>
+  </div>
+</dialog>
+<dialog id="countDlg">
+  <div class="dlg-card">
+    <div class="dlg-title" id="countTitle">数子(中国规则)</div>
+    <div class="dlg-msg" id="countMsg"></div>
+    <div class="dlg-foot">
+      <button class="btn" id="countExitBtn">继续对局</button>
+      <button class="btn primary" id="countOkBtn">确定</button>
+    </div>
   </div>
 </dialog>
 <div id="toasts" aria-live="polite"></div>

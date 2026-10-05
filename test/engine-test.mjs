@@ -1,17 +1,22 @@
-/* 9×9 围棋引擎测试:规则用例(提子 / 自杀 / 劫)+ 数子 + 记谱 + 搜索行为
+/* 19×19 围棋引擎测试:规则用例(提子 / 自杀 / 劫)+ 数子 + 记谱
  * + 随机对局模糊测试(make/unmake 往返不变量)。
+ * 搜索行为(PUCT / KataGo 对齐项)在 test/katago-align-test.mjs 与
+ * test/nn-temp-test.mjs;引擎本体已不含任何搜索。
  *
  * 运行:node test/engine-test.mjs          全部
  *      node test/engine-test.mjs ko       只跑指定节(--list 看全部)
  *
- * 摆盘注意:'X' = 黑,'O' = 白,'.' = 空;坐标 (r, c) = 行×9 + 列,行 0 在上。
+ * 摆盘注意:'X' = 黑,'O' = 白,'.' = 空;坐标 (r, c) = 行×19 + 列,行 0 在上。
+ * 历史 9 路用例整体镶在 19 路盘**左上角**(补 '.' 即可)—— 死活 / 劫 /
+ * 数子都是局部语义,坐标与断言不变;只有「贴边」语义的用例
+ * (对称围空 / 大范围公气 / 记谱)按 19 路重写。
  */
 import {
-  BLACK, WHITE, PASS, KOMI,
+  BLACK, WHITE, PASS, KOMI, N, N2,
   newBoard, replayMoves, genLegal, isLegal, syncPosition,
-  make, unmake, capturedOf, koPoint,
-  evaluate, scoreGame, moveToText, searchBest, LEVELS, DEFAULT_LEVEL,
-  boardToArray, arrayToBoard,
+  make, unmake, capturedOf, koPoint, positionKey,
+  evaluate, scoreGame, moveToText,
+  boardToArray, arrayToBoard, deadStones, finalScore, deadStonesWithOwnership, scoreBreakdown,
 } from '../src/engine.js';
 
 /* ---------- 断言框架 ---------- */
@@ -24,31 +29,30 @@ const ok = (cond, msg, extra) => {
 };
 const eq = (got, want, msg) => ok(got === want, msg, `得到 ${got},期望 ${want}`);
 
-/* ---------- 摆盘助手 ---------- */
+/* ---------- 摆盘助手:行/列不足 19 的用例自动右/下补 '.' ---------- */
 function boardFrom(rows) {
-  const bd = new Int8Array(81);
+  const bd = new Int8Array(N2);
   rows.forEach((row, r) => {
-    for (let c = 0; c < 9; c++) {
+    for (let c = 0; c < row.length && c < N; c++) {
       const ch = row[c];
-      if (ch === 'X') bd[r * 9 + c] = 1;
-      else if (ch === 'O') bd[r * 9 + c] = 2;
+      if (ch === 'X') bd[r * N + c] = 1;
+      else if (ch === 'O') bd[r * N + c] = 2;
     }
   });
   syncPosition(bd);
   return bd;
 }
-const sq = (r, c) => r * 9 + c;
-const stoneCount = (bd) => { let n = 0; for (let i = 0; i < 81; i++) if (bd[i]) n++; return n; };
+const sq = (r, c) => r * N + c;
+const stoneCount = (bd) => { let n = 0; for (let i = 0; i < N2; i++) if (bd[i]) n++; return n; };
+const EMPTY_ROW = '.'.repeat(N);
 
 /* ==================== 1. 初始局面 ==================== */
 section('init', () => {
   const bd = newBoard();
   eq(stoneCount(bd), 0, '初始局面全空');
-  eq(genLegal(bd, BLACK).length, 81, '空盘 81 个落点(停一手不进列表)');
+  eq(genLegal(bd, BLACK).length, N2, `空盘 ${N2} 个落点(停一手不进列表)`);
   ok(Math.abs(evaluate(bd) + KOMI) < 1e-9, '空盘评估 = -贴目(黑方视角)');
   eq(koPoint(), -1, '初始无劫');
-  const lv = LEVELS[DEFAULT_LEVEL];
-  ok(LEVELS.length === 4 && lv && lv.playouts > 0, '难度档 4 级且默认档有效');
 });
 
 /* ==================== 2. 提子 ==================== */
@@ -153,54 +157,281 @@ section('ko', () => {
   }
 });
 
-/* ==================== 5. 数子 ==================== */
+/* ==================== 4b. 禁全同(position superko) ==================== */
+section('superko', () => {
+  /* 送二还一:黑提白两子(非单劫,KO 不设),白立即回提一子 —— 净死子数变了,
+   * 局面是全新的,禁全同**不得**过度禁 */
+  {
+    const bd = boardFrom(['.OXX.....',
+                          'O.OOX....',
+                          '.OXX.....',
+                          '.........', '.........', '.........', '.........', '.........', '.........']);
+    eq(capturedOf(make(bd, sq(1, 1), BLACK)), 2, '黑提白两子');
+    eq(koPoint(), -1, '提两子不是单劫形');
+    ok(isLegal(bd, WHITE, sq(1, 2)), '送二还一:白回提合法(局面是新的)');
+    eq(capturedOf(make(bd, sq(1, 2), WHITE)), 1, '白回提一子');
+  }
+  /* 转置路径:不同顺序走到**同一盘面**,两路全程合法、终局键相同 ——
+   * 禁全同只认历史里出现过的键,不会过度禁 */
+  {
+    const a = newBoard(), b = newBoard();
+    make(a, sq(2, 2), BLACK); make(a, sq(6, 6), WHITE); make(a, sq(4, 4), BLACK);
+    make(b, sq(4, 4), BLACK); make(b, sq(6, 6), WHITE); make(b, sq(2, 2), BLACK);
+    eq(JSON.stringify(boardToArray(a)), JSON.stringify(boardToArray(b)), '不同顺序走到同一盘面');
+    eq(positionKey(a), positionKey(b), '同盘面 → 同键(键只认盘上棋子)');
+    const c = newBoard();
+    make(c, sq(2, 2), BLACK); make(c, sq(6, 6), WHITE); make(c, sq(4, 4), BLACK);
+    eq(positionKey(c), positionKey(a), '同序列重演 → 同键');
+  }
+  /* 增量键 == 全量重算:带提子的随机对局走到终盘,positionKey 与
+   * syncPosition 重算一致;unmake 后键也逐手还原 */
+  {
+    const bd = newBoard();
+    let seed = 20261001;
+    const rnd = () => { seed = (Math.imul(seed, 1103515245) + 12345) & 0x7fffffff; return seed / 0x7fffffff; };
+    const toks = [];
+    let side = BLACK, lastPass = false;
+    for (let t = 0; t < 120; t++) {
+      const legal = genLegal(bd, side);
+      const mv = (legal.length === 0 || rnd() < 0.05) ? PASS : legal[(rnd() * legal.length) | 0];
+      const kBefore = positionKey();
+      toks.push([mv, side, make(bd, mv, side), kBefore]);
+      if (mv === PASS && lastPass) break;
+      lastPass = mv === PASS;
+      side ^= 1;
+    }
+    const fin = boardToArray(bd);
+    const kFin = positionKey();
+    /* 逐手撤销:键随栈还原 */
+    for (let i = toks.length - 1; i >= 0; i--) {
+      const [mv, , tok] = toks[i];
+      unmake(bd, mv, tok);
+    }
+    eq(positionKey(), '0,0', '撤销到空盘 → 空盘键');
+    /* 增量键(一路 make 出来)== 全量重算(syncPosition 扫盘) */
+    arrayToBoard(fin);
+    eq(positionKey(), kFin, '带提子随机对局:增量键 == 全量重算');
+  }
+  /* 三劫循环:三个互不干扰的单劫。单劫口径下每一手回提时禁点都在别的劫,
+   * 可以无限循环;禁全同下第 6 手复原初始局面 —— 必须被禁 */
+  {
+    const TRIPLE_KO = ['.OX...OXX',
+                       'O.OX.OX.X',
+                       '.OX...OX.',
+                       '.........', '.........', '.........',
+                       '.OX......',
+                       'O.OX.....',
+                       '.OX......'];
+    const bd = boardFrom(TRIPLE_KO);
+    const k0 = positionKey();
+    /* 劫1(左上,黑先提)劫2(右上,白先提)劫3(左下,黑先提),三手各提一子 */
+    eq(capturedOf(make(bd, sq(1, 1), BLACK)), 1, '劫1:黑提白');
+    eq(capturedOf(make(bd, sq(1, 7), WHITE)), 1, '劫2:白提黑');
+    eq(capturedOf(make(bd, sq(7, 1), BLACK)), 1, '劫3:黑提白');
+    /* 回提轮转:每次回提时 KO 都指向别的劫,单劫不禁 */
+    eq(capturedOf(make(bd, sq(1, 2), WHITE)), 1, '白回提劫1(单劫口径合法)');
+    eq(capturedOf(make(bd, sq(1, 6), BLACK)), 1, '黑回提劫2(单劫口径合法)');
+    eq(koPoint(), sq(1, 7), '当前劫点在劫2 —— 不在劫3 的回提点上');
+    /* 第 6 手:白回提劫3 → 复原初始盘面(键 = k0)→ 禁全同必须禁 */
+    ok(!isLegal(bd, WHITE, sq(7, 2)), '三劫循环第 6 手复原局面:禁全同禁止');
+    ok(!genLegal(bd, WHITE).includes(sq(7, 2)), 'genLegal 也不含该点');
+    /* 白改下别处后,黑再回提劫3 复原的是「白刚下完」之前的局面吗?不是 ——
+     * 劫3 回提合法化需要劫3 局面本身出新,这里只验证循环已被打破 */
+    make(bd, sq(8, 8), WHITE);
+    const legalNow = genLegal(bd, BLACK);
+    ok(legalNow.every((p) => isLegal(bd, BLACK, p)), '打破循环后所有合法点自洽');
+    ok(k0 !== positionKey(), '局面已离开循环起点');
+  }
+  /* 摆盘重置:syncPosition 后历史只含当前局面 —— 之前对局的键不再禁着 */
+  {
+    const bd = newBoard();
+    make(bd, sq(4, 4), BLACK);
+    make(bd, sq(4, 5), WHITE);
+    const arr = boardToArray(bd);
+    const bd2 = arrayToBoard(arr);          // 同盘面重摆
+    eq(positionKey(bd2), positionKey(bd), '重摆同盘面 → 同键');
+    ok(isLegal(bd2, BLACK, sq(3, 3)), '重摆后历史已重置,正常落子不受旧历史影响');
+  }
+});
+
+
 section('score', () => {
   eq(evaluate(newBoard()), -KOMI, '空盘 = -贴目');
   {
-    /* 黑角地:(0,0) 一块空 + 两颗黑子;白单颗天元 */
+    /* 数子明细:子 / 空 / 贴目逐项对账 */
     const bd = boardFrom(['.X.......',
                           'X........',
                           '.........', '.........', '.........',
                           '.........', '.........', '.........',
                           '....O....']);
-    /* 黑 2 子 + 1 空 = 3;白 1 子;3 − 1 − 5.5 = -3.5 */
-    ok(Math.abs(evaluate(bd) + 3.5) < 1e-9, '角地数子正确', String(evaluate(bd)));
+    const d = scoreBreakdown(bd);
+    eq(d.blackStones, 2, '黑子 2');
+    eq(d.blackTerritory, 1, '黑空 1((0,0))');
+    eq(d.whiteStones, 1, '白子 1');
+    eq(d.whiteTerritory, 0, '白空 0(孤子)');
+    eq(d.black, 3, '黑 = 2 子 + 1 空');
+    eq(d.white, 1 + KOMI, '白 = 1 子 + 贴目');
+    ok(Math.abs(d.margin - (3 - (1 + KOMI))) < 1e-9, '目差自洽');
+    /* 带死子的明细:死子从对账里剔除且回传列表 */
+    const d2 = scoreBreakdown(bd, KOMI, [sq(8, 4)]);
+    eq(d2.whiteStones, 0, '白子被判死后不计');
+    eq(JSON.stringify(d2.dead), JSON.stringify([sq(8, 4)]), 'dead 列表回传');
+    /* finalScore 与 breakdown 同源同数 */
+    const f = finalScore(bd, KOMI, [sq(8, 4)]);
+    ok(f.black === d2.black && f.white === d2.white && f.margin === d2.margin
+      && JSON.stringify(f.dead) === JSON.stringify(d2.dead), 'finalScore = scoreBreakdown 的总数投影');
   }
   {
-    /* 双方各围一块:黑围左上(眼 (1,1) + 角 (0,0)),白对称围右下 */
-    /* 黑地 = (1,1) + (0,0);白地 = (7,7) + (8,8);其余空点全是公气 */
-    const bd = boardFrom(['.X.......',
-                          'X.X......',
-                          '.X.......',
-                          '.........', '.........', '.........',
-                          '.......O.',
-                          '......O.O',
-                          '.......O.']);
-    /* 黑 4 子 + 2 空 = 6;白 4 子 + 2 空 + 5.5 = 11.5;差 -5.5 */
-    const s = scoreGame(bd);
-    eq(s.black, 6, '黑 4 子 + 2 空');
-    eq(s.white, 6 + KOMI, '白 4 子 + 2 空 + 贴目');
-    ok(Math.abs(s.margin + KOMI) < 1e-9, '对称局面:白胜贴目', String(s.margin));
-  }
-  {
-    /* 公气:大空盘中央对峙,中间空点双方都贴边 = 公气,不算任何一方 */
+    /* 黑角地:(0,0) 一块空 + 两颗黑子;白单颗近角 */
     const bd = boardFrom(['.X.......',
                           'X........',
                           '.........', '.........', '.........',
                           '.........', '.........', '.........',
-                          '........O']);
+                          '....O....']);
+    /* 黑 2 子 + 1 空 = 3;白 1 子;3 − 1 − 7.5 = -5.5 */
+    ok(Math.abs(evaluate(bd) + 5.5) < 1e-9, '角地数子正确', String(evaluate(bd)));
+  }
+  {
+    /* 双方各围一块:黑围左上(眼 (1,1) + 角 (0,0)),白镜像围右下(19 路重写) */
+    const bd = boardFrom([
+      '.X' + '.'.repeat(N - 2),
+      'X.X' + '.'.repeat(N - 3),
+      '.X' + '.'.repeat(N - 2),
+      ...Array(N - 6).fill(EMPTY_ROW),
+      '.'.repeat(N - 2) + 'O' + '.',
+      '.'.repeat(N - 3) + 'O.O',
+      '.'.repeat(N - 2) + 'O' + '.',
+    ]);
+    /* 黑 4 子 + 2 空 = 6;白 4 子 + 2 空 + 贴目;差 -贴目 */
+    const s = scoreGame(bd);
+    eq(s.black, 6, '黑 4 子 + 2 空');
+    eq(s.white, 6 + KOMI, '白 4 子 + 2 空 + 贴目');
+    ok(Math.abs(s.margin + KOMI) < 1e-9, '镜像对称局面:白胜贴目', String(s.margin));
+  }
+  {
+    /* 公气:大空盘中央对峙,中间空点双方都贴边 = 公气,不算任何一方 */
+    const bd = boardFrom(['.X',
+                          'X',
+                          ...Array(N - 3).fill(''),
+                          '.'.repeat(N - 1) + 'O']);
     const s = scoreGame(bd);
     eq(s.black, 2 + 1, '黑只算自己围住的 1 点');
+    eq(s.white, 1 + KOMI, '白孤子不围空(盘面大空全为公气,只剩贴目)');
+  }
+});
+
+/* ==================== 4c. 双停死子处理 ==================== */
+section('deadstones', () => {
+  /* 验收局:白角三子死棋(黑墙密封),右下白棋一只真眼活 —— 检出死块、
+   * 且估计结果与「实战提子后数子」一致 */
+  {
+    const bd = boardFrom(['OO.X......',
+                          'O.XX......',
+                          '.XXX......',
+                          'XX........',
+                          '.........', '.........',
+                          '......OOO.',
+                          '......O.O.',
+                          '......OOO.']);
+    const t0 = Date.now();
+    const dead = deadStones(bd);
+    ok(Date.now() - t0 < 2000, '死子判定在小预算内完成');
+    eq(JSON.stringify([...dead].sort((a, b) => a - b)), JSON.stringify([sq(0, 0), sq(0, 1), sq(1, 0)]),
+      '死子 = 白角三子(黑墙与白活块不误判)');
+    /* 估计 vs 实战:把死子从盘上真移除后再数子,两者必须一致 */
+    const after = boardFrom(['...X......',
+                             '..XX......',
+                             '.XXX......',
+                             'XX........',
+                             '.........', '.........',
+                             '......OOO.',
+                             '......O.O.',
+                             '......OOO.']);
+    const est = finalScore(bd);
+    const real = scoreGame(after);
+    eq(est.black, real.black, `估计黑目 ${est.black} == 提子后 ${real.black}`);
+    eq(est.white, real.white, `估计白目 ${est.white} == 提子后 ${real.white}`);
+    ok(Math.abs(est.margin - real.margin) < 1e-9, '目差一致');
+    ok(!est.dead.includes(sq(6, 6)) && !est.dead.includes(sq(0, 3)), '活块/黑墙不在死子列表');
+    /* 移除后的角部 6 个空点必须全部归黑 —— 估计里已体现 */
+    ok(real.black >= 8 + 6, '提子后黑角空点归黑(8 子 + 6 空)', String(real.black));
+  }
+  /* 黑方死子对称:白贴着黑一子,黑仅剩 (1,0) 一口气,白先手提 —— 检出 */
+  {
+    const bd2 = boardFrom(['XO']);
+    const dead = deadStones(bd2);
+    eq(JSON.stringify(dead), JSON.stringify([sq(0, 0)]), '白先手提黑一子:黑子判死');
+  }
+  /* 手改死子重算:deadOverride 原样生效 */
+  {
+    const bd = newBoard();
+    make(bd, sq(4, 4), BLACK); make(bd, sq(4, 5), WHITE);
+    const s = finalScore(bd, KOMI, [sq(4, 4)]);
+    ok(s.dead.length === 1 && s.dead[0] === sq(4, 4), 'deadOverride 透传');
+    eq(s.black, 0, '黑子被当死子移除后不计子');
+  }
+  /* 活棋不误判:黑两眼活棋 + 白两眼活棋,死子列表为空 */
+  {
+    const bd = boardFrom(['.XX...OO.',
+                          'X.X...O.O',
+                          '.XX...OO.',
+                          '.........', '.........', '.........', '.........', '.........', '.........']);
+    const dead = deadStones(bd);
+    eq(dead.length, 0, `双方两眼活棋:无死子(得 ${JSON.stringify(dead)})`);
+  }
+  /* ownership 辅助标注(deadStonesWithOwnership):规则侧漏判补标、Benson 保底、
+   * 规则结论不翻案、模糊地带不动作 */
+  {
+    /* 单颗白子开阔地 2 气:规则侧判活(延伸可逃),NN ownership 强烈相悖 → 补标死 */
+    const bd = newBoard();
+    make(bd, sq(9, 9), WHITE);
+    eq(deadStones(bd).length, 0, '规则侧:开阔地 2 气单子判活(宁漏勿错)');
+    const dOwn = deadStonesWithOwnership(bd, new Float32Array(N2).fill(1));   // 全盘黑归属
+    eq(JSON.stringify(dOwn), JSON.stringify([sq(9, 9)]), 'ownership 相悖(白子均值 +1)→ 补标死');
+    eq(deadStonesWithOwnership(bd, new Float32Array(N2)).length, 0, 'ownership 全 0(模糊)→ 不动作');
+  }
+  {
+    /* Benson 两眼活棋保底:即使 ownership 与链色相悖也不判死 */
+    const bd = boardFrom(['.XX',
+                          'X.X',
+                          '.XX']);
+    const d = deadStonesWithOwnership(bd, new Float32Array(N2).fill(1));      // 黑归属:白棋相悖
+    eq(d.length, 0, 'Benson 活棋:ownership 相悖仍不死');
+  }
+  {
+    /* 规则侧已判死的链不因 ownership 翻案;全盘白归属下黑墙(NN 认死)被补标 ——
+     * 两个方向各自生效 */
+    const bd = boardFrom(['OO.X',
+                          'O.XX',
+                          '.XXX',
+                          'XX']);
+    const own = new Float32Array(N2).fill(-1);                                // 全盘白归属
+    const d = deadStonesWithOwnership(bd, own);
+    ok(d.includes(sq(0, 0)) && d.includes(sq(0, 1)) && d.includes(sq(1, 0)), '规则判死:不被翻案');
+    ok([sq(0, 3), sq(1, 2), sq(1, 3), sq(2, 1), sq(2, 2), sq(2, 3), sq(3, 0), sq(3, 1)].every((p) => d.includes(p)),
+      '黑墙在白归属下(NN 认死)被补标');
+  }
+  {
+    /* ownership 为空:退化为纯规则(与 deadStones 一致) */
+    const bd = boardFrom(['OO.X',
+                          'O.XX',
+                          '.XXX',
+                          'XX']);
+    const a = deadStones(bd), b = deadStonesWithOwnership(bd, null);
+    eq(JSON.stringify([...a].sort((x, y) => x - y)), JSON.stringify([...b].sort((x, y) => x - y)),
+      'ownership 为空 = 纯规则');
   }
 });
 
 /* ==================== 6. 记谱与重演 ==================== */
 section('notation', () => {
   const bd = newBoard();
-  eq(moveToText(bd, sq(2, 0)), 'A7', '左上角 = A7');
-  eq(moveToText(bd, sq(0, 8)), 'J9', '右上角 = J9(列跳过 I)');
-  eq(moveToText(bd, sq(8, 0)), 'A1', '左下角 = A1');
-  eq(moveToText(bd, sq(4, 4)), 'E5', '天元 = E5');
+  eq(moveToText(bd, sq(2, 0)), 'A17', '左上 (2,0) = A17');
+  eq(moveToText(bd, sq(0, 8)), 'J19', '(0,8) = J19(列跳过 I)');
+  eq(moveToText(bd, sq(18, 0)), 'A1', '左下角 = A1');
+  eq(moveToText(bd, sq(9, 8)), 'J10', '(9,8) = J10');
+  eq(moveToText(bd, sq(9, 9)), 'K10', '天元 = K10');
+  eq(moveToText(bd, sq(0, 18)), 'T19', '右上角 = T19');
   eq(moveToText(bd, PASS), '停一手', '停一手');
 
   /* 重演:带提子的序列在 Worker 侧重演出同样的盘面(黑白必须交替) */
@@ -220,69 +451,6 @@ section('notation', () => {
   eq(replayMoves(newBoard(), []), BLACK, '空序列从黑开始');
 });
 
-/* ==================== 7. 搜索行为 ==================== */
-const ATARI = ['.........', '.........', '.........',
-               '....X....', '...XO....', '....X....',
-               '.........', '.........', '.........'];
-section('search', () => {
-  /* 白送吃的子:轻演棋下「立即提」与「演棋里反正会被提」价值接近,
-   * 不强求树端立刻提 —— 只断言着法合法、胜率不掉出合理区间 */
-  {
-    const bd = boardFrom(ATARI);
-    const r = searchBest(bd, BLACK, { playouts: 3000, ms: 10000 });
-    ok(isLegal(bd, BLACK, r.move), '返回的着法合法', `move=${r.move}`);
-    ok(r.move !== PASS, '优势时不会停一手');
-    ok(r.winRate > 0.3 && r.winRate < 0.95, '胜率在合理区间', String(r.winRate));
-    ok(r.visits === 3000, '演棋次数用满');
-  }
-  /* 开局:不下第一线、不停一手(2000 演棋下偶有一线手,9000 才稳) */
-  {
-    const bd = newBoard();
-    const r = searchBest(bd, BLACK, { playouts: 9000, ms: 20000 });
-    ok(r.move !== PASS, '开局不停一手');
-    const rr = (r.move / 9) | 0, cc = r.move % 9;
-    ok(rr >= 1 && rr <= 7 && cc >= 1 && cc <= 7, '开局避开第一线', `(${rr},${cc})`);
-    ok(isLegal(bd, BLACK, r.move), '返回的着法合法');
-  }
-  /* 逐次回报:visits 递增、winRate 在 [0,1] */
-  {
-    const bd = newBoard();
-    const seen = [];
-    searchBest(bd, BLACK, {
-      playouts: 1000, ms: 10000,
-      onProgress: (p) => seen.push(p),
-    });
-    ok(seen.length >= 2, '有逐次回报', `${seen.length} 次`);
-    ok(seen.every((p, i) => i === 0 || p.visits > seen[i - 1].visits), 'visits 递增');
-    ok(seen.every((p) => p.winRate >= 0 && p.winRate <= 1), 'winRate 在 [0,1]');
-  }
-  /* 白方视角:自己的子在叫吃上,白会应(长气/提子/弃子转换),不会停一手干等 */
-  {
-    const bd = boardFrom(ATARI);
-    const r = searchBest(bd, WHITE, { playouts: 3000, ms: 10000 });
-    ok(isLegal(bd, WHITE, r.move), '白方返回合法着法');
-    ok(r.move !== PASS, '白方不会坐视被提');
-  }
-  /* 自对弈到双停:引擎对引擎(低预算)必须能在有限手数内正常终局并数出结果 */
-  {
-    const bd = newBoard();
-    let side = BLACK, lastPass = false, plies = 0, over = false;
-    for (let t = 0; t < 400 && !over; t++) {
-      const r = searchBest(bd, side, { playouts: 250, ms: 5000 });
-      ok(isLegal(bd, side, r.move), `第 ${t} 手着法合法`);
-      if (r.move === PASS && lastPass) { over = true; break; }
-      lastPass = r.move === PASS;
-      make(bd, r.move, side);
-      plies++;
-      side ^= 1;
-    }
-    ok(over, '自对弈在 400 手内双停终局', `${plies} 手未终局`);
-    const s = scoreGame(bd);
-    ok(Number.isFinite(s.margin) && s.black > 0 && s.white > 0, '终局数子结果合理',
-      JSON.stringify(s));
-  }
-});
-
 /* ==================== 8. 随机对局模糊测试 ==================== */
 section('fuzz', () => {
   let seed = 20260919;
@@ -293,9 +461,12 @@ section('fuzz', () => {
   let games = 0, plies = 0, ends = 0, bad = 0;
   for (let g = 0; g < 40; g++) {
     const bd = newBoard();
+    /* 禁全同直接不变量:非停一手产生的局面键,整局互不重复
+     * (初始键先入集合;停一手键不变,不重复计入) */
+    const seenKeys = new Set([positionKey()]);
     let side = BLACK, lastPass = false;
     const trail = [];                            // { mv, side, tok, legal } —— legal 是**走前**的合法列表
-    for (let t = 0; t < 220; t++) {
+    for (let t = 0; t < 420; t++) {
       const legalBefore = genLegal(bd, side);
       const stonesBefore = stoneCount(bd);
       let mv;
@@ -309,6 +480,10 @@ section('fuzz', () => {
         /* 盘面子数守恒:走前 + 1 − 提子 = 走后 */
         const capN = capturedOf(tok);
         if (stoneCount(bd) !== stonesBefore + 1 - capN) bad++;
+        /* 落子后的局面键必须是全新的 —— 这就是禁全同本身 */
+        const key = positionKey();
+        if (seenKeys.has(key)) bad++;
+        seenKeys.add(key);
       }
       trail.push({ mv, side, tok, legal: legalBefore });
       plies++;
@@ -321,7 +496,7 @@ section('fuzz', () => {
      * (强不变量 —— 劫点、提子、气全都覆盖) */
     const finalBoard = boardToArray(bd);
     for (let i = trail.length - 1; i >= 0; i--) unmake(bd, trail[i].mv, trail[i].tok);
-    eq(JSON.stringify(boardToArray(bd)), JSON.stringify(new Array(81).fill(0)), `撤销到空盘(局 ${g})`);
+    eq(JSON.stringify(boardToArray(bd)), JSON.stringify(new Array(N2).fill(0)), `撤销到空盘(局 ${g})`);
     for (let i = 0; i < trail.length; i++) {
       const { mv, side, tok, legal } = trail[i];
       const legalNow = genLegal(bd, side);

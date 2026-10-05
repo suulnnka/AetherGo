@@ -1,0 +1,897 @@
+/* ============================================================
+ * AetherGo NN 版异步 PUCT 搜索 —— v4:图搜索(useGraphSearch,最终选点/效用同 v3)
+ *
+ * == v4.1(2026-10-04):单槽管线 + 批回传叶盘面修复 ==
+ *   - 单槽管线(双并行):GPU 估值第 N 批时,主循环同步攒第 N+1 批;估值慢则
+ *     攒完在 await 处等。KataGo 多线程「线程停在叶上等 NN」的单线程投影 ——
+ *     下降见到的统计 stale 恰一批 = C++ 多线程原生语义(非偏离);在途批的
+ *     evalPending 使下一批自动避开同节点(转置去重),apply 严格按批序。
+ *   - 批回传沿 path 重 make 到叶再展开:展开时盘面在叶上(C++ runSinglePlayout
+ *     全程 board 在叶、playout 末尾才复位,search.cpp:1263/1331)。旧版批路径
+ *     把已退根的盘面传给 expand,真眼剪枝/单官压制读的是根盘面(cached 分支
+ *     传的是叶盘面,两分支不一致)。
+ *   - 终局节点不再挂 evalPending:挂着会被子选点永久跳过,双停终局值只在
+ *     创建那次 playout 生效。
+ *   - 需求驱动动态批:攒批「在途批结果一到即发射手头半批,否则攒到 maxBatch」
+ *     (KataGo waitPopUpToN 语义);批上限 = session 校准值(session.maxBatch,
+ *     createSession 现测吞吐 → 最优 90% 的最小批)再按预算压 stale(≤ 预算/16)。
+ *
+ * == 图搜索核心(KataGo search.cpp + graphhash.cpp 对齐)==
+ *   - 节点表:Map<chainKey, node>,Worker 生命期内跨手持久 —— 转置局面共享
+ *     同一节点(访问/效用统计合并),树复用升级为「子图复用」。
+ *   - 键控(graphhash.cpp 语义):子节点键 = 链式 mix(父键, 状态键) 或 纯状态键 ——
+ *     由「最后一手周边空域数」裁决:空域 > graphSearchRepBound(11) → 纯状态键
+ *     (大范围着法后历史局部性弱,按局面合并、可转置);局部战斗(≤11)→ 链式
+ *     (路径唯一,杜绝短循环)。PASS 走链式(KataGo 同)。状态键 = 盘面 Zobrist
+ *     ⊕ 行棋方 ⊕ 劫/禁点 ⊕ 尾随停着数 ⊕ passWouldEndGame。
+ *   - 惰性子节点:展开只建「着法+先验」条目;子节点本体在下降首次经过该边时
+ *     才建表/查表 —— 转置命中即接入既有子树(KataGo allocateOrFindNode 同款)。
+ *   - 边访问缩放(searchnode.h getChildWeight):共享节点的统计按
+ *     「该边访问数 / 节点总访问数」占比分摊到各父 —— 选点分母与最终选点权重
+ *     均用缩放后权重,效用均值用节点全局值。
+ *   - 循环守卫:下降路径节点打戳,选点跳过在途节点(单线程下的干净等价,
+ *     KataGo 用 graphPath 集合在到达后终止 playout)。位置超劫禁则物理不可循环:
+ *     路径即真实对局历史的延伸,重复局面被 position superko 禁止。
+ *   - GC:每次思考后从根 DFS 标记可达节点,清扫节点表(KataGo mark-and-sweep 同款)。
+ *
+ * == 沿用 v3(2026-10-03 拍板的 GTP 实战配方,详见下节与 NEURAL_PLAN §5.1)==
+ *   效用函数(winLoss+static/dynamic 目差)、FPU(按已访问 policy 混合)、
+ *   不确定度加权、真实 LCB(ESS)、noisePruning、valueWeightExponent(t₃ CDF)、
+ *   cpuct 方差因子、根评估重算(λ=0.2)、根对称剪枝、无用着剪枝、
+ *   fillDameBeforePass、批量推理(8 叶+虚拟损失)、温度选点(调用方传入+半衰)、
+ *   认输(worker 层,−0.90 连续 3 手)。
+ *
+ * == 与 KataGo 的已记录偏差 ==
+ *   - maybeCatchUpEdgeVisits(边访问追平加速)未实现:单线程下收益小;
+ *   - 循环到达即终止(KataGo)改为选点跳过在途节点(等价且少浪费一次下降);
+ *   - 转置子树的着法合法性按首访路径生成,不按新路径重查(KataGo 同);
+ *   - 根键 = fnv(整局着法)+状态键(KataGo 为逐手链式重算,语义等价)。
+ *
+ * 视角约定:节点 util/wl 累计为「走进该节点那一方」视角;scoreMean/scoreMeanSq
+ * 恒白方视角。效用域半径 R = 1.4(LCB 方差先验用)。
+ * ============================================================ */
+import {
+  N, N2, EMPTY, PASS, KOMI, genLegal, make, unmake, scoreGame, BLACK, WHITE,
+  superkoBannedPoints, ringSnapshot, ringRestore, positionKey, koPoint,
+} from '../engine.js';
+import { encodeFeatures } from './features.js';
+import { lookupEval, storeEval, fevalKey, clearEvalCache as clearEvalCacheImpl } from './eval-cache.js';
+import { pickBest, pickMove, effectiveTemperature } from './move-select.js';
+
+/* 兼容再导出:测试与外部只认 search.js 一个入口。
+ * clearEvalCache 同时清空评估缓存与图节点表(测试隔离用)。 */
+export { pickBest, pickMove, effectiveTemperature };
+export function clearEvalCache() {
+  clearEvalCacheImpl();
+  nodeTable = new Map();
+  treeKeep = null;
+}
+
+/* ==================== GTP 实战配方常数(setup.cpp SETUP_FOR_GTP) ==================== */
+const CPUCT = 1.0, CPUCT_LOG = 0.45, CPUCT_BASE = 500;
+const PUCT_OFFSET = 0.01;               // TOTALCHILDWEIGHT_PUCT_OFFSET
+const FPU = 0.2, ROOT_FPU = 0.1;
+const FPU_BLEND_POW = 2.0;              // fpuParentWeightByVisitedPolicyPow
+const STATIC_F = 0.1, DYNAMIC_F = 0.3;
+const CENTER_ZERO_W = 0.20, CENTER_SCALE = 0.75;
+const STDEV_PRIOR = 0.40, STDEV_PRIOR_W = 2.0, STDEV_SCALE = 0.85;
+const UNCERT_COEFF = 0.25, UNCERT_MAX_W = 8.0;
+const VALUE_WEIGHT_EXP = 0.25;
+const NOISE_PRUNE_SCALE = 0.15;
+const LCB_STDEVS = 5.0, LCB_MIN_PROP = 0.15;
+const UTILITY_RADIUS = 1.0 + STATIC_F + DYNAMIC_F;
+const PRIOR_FLOOR = 1e-4;
+const PASS_SUPPRESS = 1e-3;
+const ROOT_OPTIMISM = 0.2;              // rootPolicyOptimism(GTP;树内 λ=1.0)
+const REP_BOUND = 11;                   // graphSearchRepBound(GTP)
+
+const TWO_OVER_PI = 2 / Math.PI;
+const SQRT_AREA = Math.sqrt(N2);
+
+/* ==================== ScoreValue JS 版(nninputs.cpp 权威) ==================== */
+
+function expectedScoreValue(m, sd, center, scale) {
+  const den = scale * SQRT_AREA;
+  if (sd < 1e-9) return Math.atan((m - center) / den) * TWO_OVER_PI;
+  const s3 = Math.sqrt(3) * sd;
+  const f = (x) => Math.atan((x - center) / den);
+  return (2 / 3) * f(m) + (1 / 6) * (f(m + s3) + f(m - s3));
+}
+
+function scoreValueDeriv(m, center, scale) {
+  const sf = scale * SQRT_AREA, a = m - center;
+  return sf / (sf * sf + a * a) * TWO_OVER_PI;
+}
+
+/* ==================== 着法筛选助手(无用着 / 单官) ==================== */
+
+export function isOwnTrueEye(bd, side, p) {
+  const mine = side + 1;
+  const r = (p / N) | 0, c = p % N;
+  if (r > 0 && bd[p - N] !== mine) return false;
+  if (r < N - 1 && bd[p + N] !== mine) return false;
+  if (c > 0 && bd[p - 1] !== mine) return false;
+  if (c < N - 1 && bd[p + 1] !== mine) return false;
+  let enemyDiag = 0;
+  for (let dr = -1; dr <= 1; dr += 2) {
+    for (let dc = -1; dc <= 1; dc += 2) {
+      const rr = r + dr, cc = c + dc;
+      if (rr < 0 || rr >= N || cc < 0 || cc >= N) continue;
+      if (bd[rr * N + cc] === 3 - mine) enemyDiag++;
+    }
+  }
+  return enemyDiag === 0;
+}
+
+export function countDame(bd) {
+  const seen = new Uint8Array(N2);
+  const stack = [];
+  let dame = 0;
+  for (let seed = 0; seed < N2; seed++) {
+    if (bd[seed] !== EMPTY || seen[seed]) continue;
+    stack.length = 0; stack.push(seed); seen[seed] = 1;
+    let touch = 0, size = 0;
+    while (stack.length) {
+      const q = stack.pop(); size++;
+      const r = (q / N) | 0, c = q % N;
+      for (let k = 0; k < 4; k++) {
+        let nb = -1;
+        if (k === 0 && r > 0) nb = q - N;
+        else if (k === 1 && r < N - 1) nb = q + N;
+        else if (k === 2 && c > 0) nb = q - 1;
+        else if (k === 3 && c < N - 1) nb = q + 1;
+        if (nb < 0) continue;
+        const v = bd[nb];
+        if (v === EMPTY) { if (!seen[nb]) { seen[nb] = 1; stack.push(nb); } }
+        else touch |= (v === 1 ? 1 : 2);
+      }
+    }
+    if (touch !== 1 && touch !== 2) dame += size;
+  }
+  return dame;
+}
+
+/* ==================== 图搜索:节点表与键控(graphhash.cpp 对齐) ==================== */
+
+
+let nodeTable = new Map();              // chainKey → node(Worker 生命期内持久)
+let gcEpoch = 0;
+let treeKeep = null;                    // { root, recentMoves }
+
+/* 双种子 FNV(字符串 → "h1,h2")—— 链式键压缩用 */
+function fnv2(str) {
+  let h1 = 0x811c9dc5, h2 = 0x01000193;
+  for (let i = 0; i < str.length; i++) {
+    const c = str.charCodeAt(i);
+    h1 = Math.imul(h1 ^ c, 16777619);
+    h2 = Math.imul(h2 + c ^ (i * 40503 | 0), 16777619);
+  }
+  return `${h1},${h2}`;
+}
+
+const BAN_SCRATCH = new Uint8Array(N2);
+/* 状态键:盘面 Zobrist ⊕ 行棋方 ⊕ 劫/禁点 ⊕ 尾随停着 ⊕ passWouldEndGame。
+ * bd/side 必须处于 make 后的活状态(节点创建时机保证)。 */
+function stateKeyOf(bd, side, trailingPasses) {
+  const bans = superkoBannedPoints(bd, side, BAN_SCRATCH);
+  let bh = 0;
+  for (let p = 0; p < N2; p++) if (bans[p]) bh = (bh + p + 1) | 0;
+  const passEnds = trailingPasses >= 1 ? 1 : 0;
+  return `${positionKey()}|${side}|${koPoint()}|${bh}|${trailingPasses}|${passEnds}`;
+}
+
+/* 最后一手周边「活动区域」空点数(graphhash.cpp simpleRepetitionBoundGt 的
+ * 计数口径:链长 + 相邻连通空域),> REP_BOUND → 状态键合并,否则链式。 */
+const REG_SEEN = new Int32Array(N2);
+let regStamp = 0;
+function regionCount(bd, mv) {
+  let total = 0;
+  regStamp++;
+  const floodEmpty = (start) => {
+    const st = [start];
+    REG_SEEN[start] = regStamp;
+    while (st.length) {
+      const q = st.pop(); total++;
+      if (total > REP_BOUND) return;
+      const r = (q / N) | 0, c = q % N;
+      for (let k = 0; k < 4; k++) {
+        let nb = -1;
+        if (k === 0 && r > 0) nb = q - N;
+        else if (k === 1 && r < N - 1) nb = q + N;
+        else if (k === 2 && c > 0) nb = q - 1;
+        else if (k === 3 && c < N - 1) nb = q + 1;
+        if (nb >= 0 && bd[nb] === EMPTY && REG_SEEN[nb] !== regStamp) { REG_SEEN[nb] = regStamp; st.push(nb); }
+      }
+    }
+  };
+  if (mv === PASS) return 0;                        // KataGo:PASS → 链式
+  if (bd[mv] === EMPTY) { floodEmpty(mv); return total; }   // snapback 空点
+  /* 链长 + 每气连通空域 */
+  const st = [mv], chainSeen = new Set([mv]);
+  const chain = [];
+  while (st.length) {
+    const q = st.pop(); chain.push(q);
+    const r = (q / N) | 0, c = q % N;
+    for (let k = 0; k < 4; k++) {
+      let nb = -1;
+      if (k === 0 && r > 0) nb = q - N;
+      else if (k === 1 && r < N - 1) nb = q + N;
+      else if (k === 2 && c > 0) nb = q - 1;
+      else if (k === 3 && c < N - 1) nb = q + 1;
+      if (nb < 0) continue;
+      if (bd[nb] === bd[mv] && !chainSeen.has(nb)) { chainSeen.add(nb); st.push(nb); }
+    }
+  }
+  total = chain.length;
+  if (total > REP_BOUND) return total;
+  for (const q of chain) {
+    const r = (q / N) | 0, c = q % N;
+    for (let k = 0; k < 4; k++) {
+      let nb = -1;
+      if (k === 0 && r > 0) nb = q - N;
+      else if (k === 1 && r < N - 1) nb = q + N;
+      else if (k === 2 && c > 0) nb = q - 1;
+      else if (k === 3 && c < N - 1) nb = q + 1;
+      if (nb >= 0 && bd[nb] === EMPTY && REG_SEEN[nb] !== regStamp) floodEmpty(nb);
+      if (total > REP_BOUND) return total;
+    }
+  }
+  return total;
+}
+
+/** 子节点键:局部战斗链式(路径唯一),大范围着法状态键(可转置) */
+function childChainKey(parent, mv, bd, childSide, trailingAfter) {
+  const sk = stateKeyOf(bd, childSide, trailingAfter);
+  if (mv !== PASS && regionCount(bd, mv) > REP_BOUND) return { key: `S${sk}`, state: true };
+  return { key: `C${fnv2(parent.chainKey)}|${sk}`, state: false };
+}
+
+function computeTrailing(moves) {
+  let t = 0;
+  for (let i = moves.length - 1; i >= 0 && moves[i] === PASS; i--) t++;
+  return t;
+}
+
+/** 测试钩子:当前节点表规模 */
+export const __nodeTableSize = () => nodeTable.size;
+
+/* ==================== t 分布(ν=3)CDF 闭式 ==================== */
+function t3cdf(x) {
+  const y = x / Math.sqrt(3);
+  return 0.5 + (y / (1 + y * y) + Math.atan(y)) / Math.PI;
+}
+
+/**
+ * opt: { session, visits, komi = KOMI, recentMoves, onProgress,
+ *        temperature = 0, temperatureHalflife = 0,
+ *        maxBatch(校准批上限;旧 opt.batch 兜底,缺省 4),
+ *        reuseTree = true(默认:节点表跨手持久), debug = false }
+ * 返回:{ move, winRate, visits, nodes, ms, only, reused, nnCalls, cacheHits,
+ *        temperature, scoreLead, debug: rootChildren/rootChildMoves/rootChildStats }
+ */
+export async function nnSearchBest(bd, side, opt = {}) {
+  const t0 = Date.now();
+  const komi = opt.komi ?? KOMI;
+  const budget = opt.visits ?? 300;
+  const temperature = opt.temperature ?? 0;
+  const temperatureHalflife = opt.temperatureHalflife ?? 0;
+  /* 批上限:校准值(opt.maxBatch,session 加载时现测)优先,旧 opt.batch 兜底;
+   * 再按预算压 stale(批 ≤ 预算/16 → 至少 16 轮回传,下限 2),小预算自动小批 */
+  const maxBatch = Math.max(1, Math.min(opt.maxBatch ?? opt.batch ?? 4, Math.max(2, budget >> 4)));
+  const minBatch = Math.max(1, Math.min(maxBatch, 4));
+  const evalBatch = opt.session.evalBatch.bind(opt.session);
+  const rootRecent = opt.reuseTree === false ? (opt.recentMoves ?? []).slice() : (opt.recentMoves ?? []);
+  const spBuf = new Float32Array(22 * N2), glBuf = new Float32Array(19);
+  let cacheHits = 0;
+  let recentScoreCenter = 0;
+
+  /* reuseTree=false:本搜索用独立节点表(不读不写全局表) */
+  const table = opt.reuseTree === false ? new Map() : nodeTable;
+
+  const makeNode = (move, stm, chainKey) => ({
+    move, side: stm, children: null,
+    visits: 0, weight: 0, weightSq: 0,
+    util: 0, utilSq: 0, wl: 0,
+    scoreMean: 0, scoreMeanSq: 0,
+    nn: null, terminal: false, terminalSem: null,
+    chainKey, evalPending: false, _gc: 0,
+  });
+
+  /* ---- 语义值管道(同 v3) ---- */
+  const semOf = (out) => {
+    const hasScore = Number.isFinite(out.scoreMean);
+    return {
+      wlW: out.winLoss,
+      mW: hasScore ? out.scoreMean : 0,
+      sdW: hasScore ? (out.scoreStdev ?? 0) : 0,
+      stWL: out.shorttermWinlossError ?? 0,
+      stScore: out.shorttermScoreError ?? 0,
+      hasScore,
+    };
+  };
+  const utilityWhite = (sem) => sem.wlW + (sem.hasScore ? scoreUtility(sem.mW, sem.sdW) : 0);
+  function scoreUtility(mW, sdW) {
+    return STATIC_F * expectedScoreValue(mW, sdW, 0, 2)
+         + DYNAMIC_F * expectedScoreValue(mW, sdW, recentScoreCenter, CENTER_SCALE);
+  }
+  function scoreUtilityDeriv(mW) {
+    return STATIC_F * scoreValueDeriv(mW, 0, 2)
+         + DYNAMIC_F * scoreValueDeriv(mW, recentScoreCenter, CENTER_SCALE);
+  }
+  const uncertaintyWeight = (sem) => {
+    if (!sem.hasScore) return 1.0;
+    const unc = 1.0 * sem.stWL + scoreUtilityDeriv(sem.mW) * sem.stScore;
+    return UNCERT_COEFF / (unc + UNCERT_COEFF / UNCERT_MAX_W);
+  };
+
+  /* ---- 根节点:表查/建 + 树复用(reuse 模式沿子边下移) ---- */
+  let root, reused = 0;
+  const rootStateKey = stateKeyOf(bd, side, computeTrailing(rootRecent));
+  const rootKey = `R${fnv2(rootRecent.join(','))}|${rootStateKey}`;
+  if (opt.reuseTree !== false && treeKeep
+    && treeKeep.recentMoves.length + 2 <= rootRecent.length
+    && rootRecent.slice(0, treeKeep.recentMoves.length).every((m, i) => m === treeKeep.recentMoves[i])) {
+    /* 沿「己方上一手 + 对方应手」下移(子图复用) */
+    let n = treeKeep.root;
+    const tail = rootRecent.slice(treeKeep.recentMoves.length);
+    let okk = n.side === (treeKeep.recentMoves.length % 2 === 0 ? side : side ^ 1);
+    for (const mv of tail) {
+      const ch = (n.children ?? []).find((c) => c.move === mv && c.node);
+      if (!ch || !ch.node.children) { okk = false; break; }
+      n = ch.node;
+      reused++;
+    }
+    if (okk && n.children && n.children.length) root = n;
+  }
+  if (!root) {
+    root = table.get(rootKey) ?? null;
+    if (root) reused = -1;                        // 跨局命中(同局面重开)
+  }
+  if (!root) {
+    root = makeNode(-1, side, rootKey);
+    table.set(rootKey, root);
+    reused = 0;
+  }
+
+  /* ---- 单批虚拟损失(节点级;含根) ---- */
+  const virtualApply = (path) => {
+    for (let i = 0; i < path.length; i++) {
+      const n = path[i].node;
+      n.visits++; n.weight += 1; n.util -= 1; n.utilSq += 1;
+    }
+  };
+  const virtualRemove = (path) => {
+    for (let i = 0; i < path.length; i++) {
+      const n = path[i].node;
+      n.visits--; n.weight -= 1; n.util += 1; n.utilSq -= 1;
+    }
+  };
+
+  /* ---- 回传(节点统计全局累计;边访问在下降时已计) ---- */
+  function backup(path, leafSide, sem, weight) {
+    const uW = utilityWhite(sem);
+    const leafWhite = leafSide === WHITE;
+    const uLeaf = leafWhite ? uW : -uW;
+    const wlLeaf = leafWhite ? sem.wlW : -sem.wlW;
+    for (let i = 0; i < path.length; i++) {
+      const n = path[i].node;
+      const sign = ((n.side ^ 1) === leafSide) ? 1 : -1;
+      n.visits++;
+      n.weight += weight; n.weightSq += weight * weight;
+      n.util += sign * uLeaf; n.utilSq += uLeaf * uLeaf;
+      n.wl += sign * wlLeaf;
+      if (sem.hasScore) { n.scoreMean += sem.mW * weight; n.scoreMeanSq += sem.mW * sem.mW * weight; }
+    }
+  }
+  const finishNow = (e, sem, weight = 1) => {
+    backup(e.path, e.node.side, sem, weight);
+    for (let i = e.path.length - 1; i >= 1; i--) unmake(bd, e.path[i].move, e.path[i].tok);
+  };
+
+  /* ---- 展开:着法+先验条目(节点本体惰性建) ---- */
+  function expand(node, policy, policyPass, leafBd, legalMoves) {
+    const stm = node.side;
+    const moves = [], logits = [];
+    for (const mv of legalMoves) {
+      if (isOwnTrueEye(leafBd, stm, mv)) continue;
+      moves.push(mv); logits.push(policy[mv]);
+    }
+    const passIdx = moves.length;
+    moves.push(PASS); logits.push(policyPass);
+    let mx = -Infinity;
+    for (const l of logits) if (l > mx) mx = l;
+    let sum = 0;
+    const probs = new Array(logits.length);
+    for (let i = 0; i < logits.length; i++) { const e = Math.exp(logits[i] - mx); probs[i] = e; sum += e; }
+    for (let i = 0; i < probs.length; i++) probs[i] /= sum;
+    if (opt.fillDameBeforePass !== false && countDame(leafBd) > 0) probs[passIdx] *= PASS_SUPPRESS;
+    let keepSum = 0;
+    const keep = [];
+    for (let i = 0; i < moves.length; i++) {
+      if (i !== passIdx && probs[i] < PRIOR_FLOOR) continue;
+      keep.push(i); keepSum += probs[i];
+    }
+    node.children = new Array(keep.length);
+    for (let k = 0; k < keep.length; k++) {
+      const i = keep[k];
+      node.children[k] = { move: moves[i], prior: probs[i] / keepSum, node: null, edgeVisits: 0 };
+    }
+  }
+
+  /* 树复用后的根先验刷新(同 v3) */
+  function refreshRootPriors(policy, policyPass, legalMoves) {
+    const chs = root.children;
+    const idxOf = new Map(chs.map((ch, i) => [ch.move, i]));
+    const mvs = [], logits = [], slot = [];
+    for (const mv of legalMoves) {
+      const i = idxOf.get(mv);
+      if (i === undefined) continue;
+      mvs.push(mv); logits.push(policy[mv]); slot.push(i);
+    }
+    if (idxOf.has(PASS)) { mvs.push(PASS); logits.push(policyPass); slot.push(idxOf.get(PASS)); }
+    let mx = -Infinity;
+    for (const l of logits) if (l > mx) mx = l;
+    let sum = 0;
+    const probs = logits.map((l) => { const e = Math.exp(l - mx); sum += e; return e; });
+    let keepSum = 0;
+    for (let k = 0; k < probs.length; k++) {
+      if (mvs[k] === PASS && opt.fillDameBeforePass !== false && countDame(bd) > 0) probs[k] *= PASS_SUPPRESS;
+      if (mvs[k] !== PASS && probs[k] / sum < PRIOR_FLOOR) probs[k] = 0;
+      keepSum += probs[k];
+    }
+    for (let k = 0; k < probs.length; k++) {
+      chs[slot[k]].prior = probs[k] > 0 ? probs[k] / keepSum : 1e-6;
+    }
+  }
+
+  /* ---- FPU(searchexplorehelpers.cpp 同款) ---- */
+  function parentStdev(node) {
+    const acc = node.weight > 0 ? node.util / node.weight : 0;
+    if (node.visits <= 0 || node.weight <= 1) return STDEV_PRIOR;
+    const u2 = acc * acc;
+    const uSqAvg = Math.max(node.utilSq / node.weight, u2);
+    return Math.sqrt(Math.max(0,
+      ((u2 + STDEV_PRIOR * STDEV_PRIOR) * STDEV_PRIOR_W + uSqAvg * node.weight)
+      / (STDEV_PRIOR_W + node.weight - 1) - u2));
+  }
+  function fpuForChildren(node, policyMass, isRoot) {
+    const acc = node.weight > 0 ? node.util / node.weight : 0;
+    const accW = ((node.side ^ 1) === WHITE) ? acc : -acc;
+    let blendW = accW;
+    if (node.nn) {
+      const avgW = Math.min(1, Math.pow(Math.max(policyMass, 0), FPU_BLEND_POW));
+      blendW = avgW * accW + (1 - avgW) * utilityWhite(node.nn);
+    }
+    const red = (isRoot ? ROOT_FPU : FPU) * Math.sqrt(Math.max(policyMass, 0));
+    return (node.side === WHITE ? blendW : -blendW) - red;
+  }
+
+  /* ---- PUCT 下降:惰性建子 + 转置接入 + 在途跳过 ---- */
+  let rootRing = null;
+  let pathStamp = 0;
+  function descend() {
+    ringRestore(rootRing);
+    let cur = root;
+    const path = [{ node: root, move: -1, tok: -1 }];
+    const recent = rootRecent.slice();
+    pathStamp++;
+    cur._ps = pathStamp;
+    while (!cur.terminal && cur.nn && cur.children) {
+      let totalW = 0, pMass = 0;
+      for (const ch of cur.children) {
+        totalW += ch.node ? ch.node.weight : 0;
+        pMass += Math.max(ch.prior, 0);
+      }
+      const cpuct = CPUCT + CPUCT_LOG * Math.log((totalW + CPUCT_BASE) / CPUCT_BASE);
+      const stdevFactor = 1 + STDEV_SCALE * (parentStdev(cur) / STDEV_PRIOR - 1);
+      const explore = cpuct * Math.sqrt(totalW + PUCT_OFFSET) * stdevFactor;
+      const fpu = fpuForChildren(cur, pMass, cur === root);
+      let best = null, bestV = -Infinity;
+      for (const ch of cur.children) {
+        if (ch.prior <= 0) continue;                          // 对称剪枝置零
+        const n = ch.node;
+        if (n && (n._ps === pathStamp || n.evalPending)) continue;   // 在途/评估中:跳过(循环守卫)
+        let q, denom;
+        if (!n) { q = fpu; denom = 1; }                       // 未走过的边:FPU
+        else {
+          q = (n.visits > 0 && n.weight > 0) ? n.util / n.weight : fpu;
+          /* 边访问缩放:该边分摊的权重(getChildWeight 口径) */
+          denom = 1 + n.weight * (ch.edgeVisits / Math.max(n.visits, 1));
+        }
+        const v = q + explore * ch.prior / denom;
+        if (v > bestV) { bestV = v; best = ch; }
+      }
+      if (!best) break;
+      const isFreshEdge = best.node === null;
+      let node;
+      if (isFreshEdge) {
+        const tok = make(bd, best.move, cur.side);            // 活状态 → 子位置
+        const trailing = computeTrailing(recent.concat(best.move));
+        const { key } = childChainKey(cur, best.move, bd, cur.side ^ 1, trailing);
+        node = table.get(key) ?? null;
+        if (node && (node.evalPending || !node.nn)) {
+          /* 同批已有在途评估:本边暂不可下 —— 回退并当死端(不计边访问,防同节点双评估) */
+          unmake(bd, best.move, tok);
+          break;
+        }
+        if (!node) {
+          node = makeNode(best.move, cur.side ^ 1, key);
+          /* 双停终局:建表时判(活盘面即终局盘面;节点按位置身份,转置命中同键必然同终局) */
+          if (cur.move === PASS && best.move === PASS) {
+            node.terminal = true;
+            const s = scoreGame(bd, komi);
+            node.terminalSem = {
+              wlW: s.margin > 0 ? -1 : s.margin < 0 ? 1 : 0,
+              mW: -s.margin, sdW: 0, stWL: 0, stScore: 0, hasScore: true,
+            };
+          }
+          /* 终局无评估,不挂在途标:evalPending 的子会被选点跳过,挂着等于
+           * 双停终局值只在创建那次 playout 生效,之后永远无法再访问 */
+          node.evalPending = !node.terminal;
+          table.set(key, node);
+        }
+        best.node = node;                                     // 转置接入或新建
+        best.edgeVisits++;
+        node._ps = pathStamp;
+        path.push({ node, move: best.move, tok });
+        recent.push(best.move);
+        cur = node;
+        if (node.terminal) break;                             // 双停终局(转置命中同键必然同终局)
+        if (node.nn) continue;                                // 转置命中既有子树:继续下潜
+        break;                                                // 新叶:待评估
+      } else {
+        const tok = make(bd, best.move, cur.side);
+        best.edgeVisits++;
+        node = best.node;
+        node._ps = pathStamp;
+        path.push({ node, move: best.move, tok });
+        recent.push(best.move);
+        cur = node;
+        if (node.terminal) break;
+        if (!node.nn) break;                                  // 评估在途(罕见):当叶处理
+      }
+    }
+    return { node: cur, path, recent };
+  }
+
+  /* ---- 主循环前置:根评估(λ=0.2)→ recentScoreCenter + 根先验 + 环快照 ---- */
+  {
+    const f = encodeFeatures(bd, side, { recentMoves: rootRecent, komi, outSpatial: spBuf, outGlobal: glBuf });
+    const [out] = await evalBatch([{ spatial: f.spatial, global: f.global, optimism: ROOT_OPTIMISM }]);
+    const sem = semOf(out);
+    const expectedScore = (root.visits > 0 && root.weight > 0)
+      ? root.scoreMean / root.weight : sem.mW;
+    recentScoreCenter = expectedScore * (1 - CENTER_ZERO_W);
+    const cap = SQRT_AREA * CENTER_SCALE;
+    if (recentScoreCenter > expectedScore + cap) recentScoreCenter = expectedScore + cap;
+    if (recentScoreCenter < expectedScore - cap) recentScoreCenter = expectedScore - cap;
+    if (!root.nn) {
+      root.nn = sem;
+      expand(root, out.policy, out.policyPass, bd, genLegal(bd, side));
+    } else {
+      refreshRootPriors(out.policy, out.policyPass, genLegal(bd, side));
+    }
+    rootRing = ringSnapshot();
+  }
+
+  /* ---- 根对称剪枝(保守式) ---- */
+  {
+    const banMask = new Uint8Array(N2);
+    superkoBannedPoints(bd, side, banMask);
+    let banned = false;
+    for (let p = 0; p < N2; p++) if (banMask[p]) { banned = true; break; }
+    if (!banned) pruneSymmetricRootMoves(root.children, bd);
+  }
+
+  let iters = 0, nnCalls = 0;
+
+  /* ---- 批回传:沿 path 重 make 到叶再展开(展开时盘面在叶上 —— C++
+   * runSinglePlayout 全程 board 在叶、playout 末尾才复位,search.cpp:1263/1331)。
+   * remake 的 token 与攒批侧存的不同,unmake 必须配对新 token。 ---- */
+  const remakePath = (path) => {
+    const toks = new Array(path.length - 1);
+    for (let k = 1; k < path.length; k++) {
+      toks[k - 1] = make(bd, path[k].move, path[k - 1].node.side);
+    }
+    return toks;
+  };
+
+  /* ---- 批回传 + 进度上报(单槽管线保证严格按批序调用) ---- */
+  const applyBatch = (pending, outs) => {
+    nnCalls++;
+    for (let i = 0; i < pending.length; i++) {
+      const p = pending[i], out = outs[i];
+      virtualRemove(p.path);
+      const toks = remakePath(p.path);
+      expand(p.node, out.policy, out.policyPass, bd, p.legalMoves);
+      for (let k = p.path.length - 1; k >= 1; k--) unmake(bd, p.path[k].move, toks[k - 1]);
+      const sem = semOf(out);
+      p.node.nn = sem;
+      p.node.evalPending = false;
+      backup(p.path, p.node.side, sem, uncertaintyWeight(sem));
+      storeEval(p.key, out);                  // λ=1 口径原样入缓存(root 不走缓存)
+      iters++;
+    }
+    if (opt.onProgress && (iters & 63) === 0) {
+      const best = pickBest(root);
+      const q = best && best.node.weight > 0 ? best.node.util / best.node.weight : 0;
+      opt.onProgress({
+        visits: iters, move: best ? best.move : PASS,
+        winRate: (q + 1) / 2,
+        scoreLead: root.nn && root.nn.hasScore ? (side === WHITE ? root.nn.mW : -root.nn.mW) : null,
+        ms: Date.now() - t0,
+      });
+    }
+  };
+
+  /* ---- 单槽管线(双并行 + 需求驱动动态批):GPU 估值第 N 批时,主循环同步攒
+   * 第 N+1 批;在途批结果一到(inflight.done)立即停手发射手头半批,估值慢则攒到
+   * maxBatch 为止 —— KataGo waitPopUpToN「等一个、取空、不凑批」的单线程投影
+   * (nneval.cpp:839 + threadsafequeue.h:172),有效批大小随 GPU/下降耗时比涌现。
+   * GPU 空闲(无在途)时至少攒 minBatch 再发射。下降见到的统计 stale 恰一批
+   * (C++ 多线程原生语义);在途批的 evalPending 让下一批自动避开同节点;
+   * 预算计入在途,总访问仍收敛 budget。apply 严格按批序。 ---- */
+  let inflight = null;                        // { promise, pending, done }
+  const settleInflight = async () => {
+    if (!inflight) return;
+    applyBatch(inflight.pending, await inflight.promise);
+    inflight = null;
+  };
+  while (iters < budget) {
+    const pending = [];
+    while (pending.length < maxBatch
+      && iters + (inflight ? inflight.pending.length : 0) + pending.length < budget
+      && (inflight ? !inflight.done : pending.length < minBatch)) {
+      const e = descend();
+      if (e.node.terminal) {
+        finishNow(e, e.node.terminalSem, 1);
+        iters++;
+        continue;
+      }
+      if (e.node.nn) {                                        // 死端(全子被跳过:在途/转置回边)
+        for (let i = e.path.length - 1; i >= 1; i--) unmake(bd, e.path[i].move, e.path[i].tok);
+        if (pending.length > 0) break;                        // 已攒半批:立即结算
+        if (inflight) { await settleInflight(); continue; }   // 在途饱和:收批解饱和,不烧预算
+        iters++;                                              // 真死端:计一访(KataGo 循环访问同款)
+        continue;
+      }
+      const f = encodeFeatures(bd, e.node.side, {
+        recentMoves: e.recent, komi, outSpatial: spBuf, outGlobal: glBuf,
+      });
+      const key = fevalKey(f.spatial, f.global);
+      const cached = lookupEval(key);
+      if (cached) {
+        cacheHits++;
+        const sem = semOf(cached);
+        virtualApply(e.path);
+        expand(e.node, cached.policy, cached.policyPass, bd, genLegal(bd, e.node.side));
+        e.node.nn = sem;
+        e.node.evalPending = false;
+        virtualRemove(e.path);
+        backup(e.path, e.node.side, sem, uncertaintyWeight(sem));
+        for (let i = e.path.length - 1; i >= 1; i--) unmake(bd, e.path[i].move, e.path[i].tok);
+        iters++;
+        continue;
+      }
+      pending.push({
+        node: e.node, path: e.path, key,
+        legalMoves: genLegal(bd, e.node.side),
+        spatial: Float32Array.from(f.spatial), global: Float32Array.from(f.global),
+      });
+      virtualApply(e.path);
+      for (let i = e.path.length - 1; i >= 1; i--) unmake(bd, e.path[i].move, e.path[i].tok);
+    }
+
+    await settleInflight();                   // 先收上一批 —— 攒批期间 GPU 一直在跑(双并行)
+    if (pending.length === 0) continue;       // 预算已尽(或死端结算完):外层条件收口
+    const batch = {
+      promise: evalBatch(pending.map((p) => ({ spatial: p.spatial, global: p.global }))),
+      pending,
+      done: false,
+    };
+    batch.promise.then(() => { batch.done = true; }, () => { batch.done = true; });
+    inflight = batch;                         // 结果一到攒批条件即退出(动态批)
+  }
+  await settleInflight();                     // 收尾:末批须在选点前回传
+
+  /* ==================== 最终选点(edge 缩放权重;精修同 v3) ==================== */
+  const tEff = effectiveTemperature(temperature, temperatureHalflife, rootRecent.length);
+  const move = chooseFinalMove(root, tEff);
+  const best = pickBest(root);
+  const bestQ = best && best.node.weight > 0 ? best.node.util / best.node.weight : 0;
+  const winRate = (bestQ + 1) / 2;
+
+  /* ---- GC:从根标记可达,清扫节点表(KataGo mark-and-sweep) ---- */
+  if (opt.reuseTree !== false) {
+    gcEpoch++;
+    const stack = [root];
+    root._gc = gcEpoch;
+    while (stack.length) {
+      const n = stack.pop();
+      for (const ch of n.children ?? []) {
+        if (ch.node && ch.node._gc !== gcEpoch) { ch.node._gc = gcEpoch; stack.push(ch.node); }
+      }
+    }
+    for (const [k, n] of table) if (n._gc !== gcEpoch) table.delete(k);
+    if (table !== nodeTable) { /* 局部表(reuseTree=false):随搜索结束丢弃 */ }
+  }
+
+  treeKeep = { root, recentMoves: rootRecent.slice() };
+  return {
+    move, winRate, visits: iters, nodes: iters, ms: Date.now() - t0,
+    scoreLead: root.nn && root.nn.hasScore ? (side === WHITE ? root.nn.mW : -root.nn.mW) : null,
+    only: !root.children || root.children.filter((c) => (c.prior ?? 0) > 0).length <= 1,
+    reused: Math.max(reused, 0), nnCalls, cacheHits, temperature: tEff,
+    rootChildren: opt.debug ? (root.children?.length ?? 0) : undefined,
+    rootChildMoves: opt.debug ? (root.children ?? []).map((c) => c.move) : undefined,
+    rootChildStats: opt.debug ? (root.children ?? []).map((c) => ({
+      m: c.move, v: c.edgeVisits,
+      q: c.node && c.node.weight ? +(c.node.util / c.node.weight).toFixed(3) : 0,
+    })) : undefined,
+  };
+}
+
+/* ==================== 根对称剪枝(保守式) ==================== */
+
+const SYM8 = (() => {
+  const syms = [];
+  for (let s = 0; s < 8; s++) {
+    const map = new Int32Array(N2);
+    for (let r = 0; r < N; r++) {
+      for (let c = 0; c < N; c++) {
+        let rr = r, cc = c;
+        for (let k = 0; k < (s & 3); k++) { const t = rr; rr = cc; cc = N - 1 - t; }
+        if (s & 4) cc = N - 1 - cc;
+        map[r * N + c] = rr * N + cc;
+      }
+    }
+    syms.push(map);
+  }
+  return syms;
+})();
+
+function pruneSymmetricRootMoves(children, bd) {
+  if (!children || children.length < 2) return;
+  for (let s = 1; s < 8; s++) {
+    const map = SYM8[s];
+    let sym = true;
+    for (let p = 0; p < N2; p++) {
+      if (bd[p] !== bd[map[p]]) { sym = false; break; }
+    }
+    if (!sym) continue;
+    const order = children.slice().sort((a, b) => (b.prior ?? 0) - (a.prior ?? 0));
+    const killed = new Set();
+    for (const ch of order) {
+      const mv = ch.move;
+      if (mv === PASS || killed.has(mv) || (ch.prior ?? 0) <= 0) continue;
+      const symMv = map[mv];
+      if (symMv !== mv && !killed.has(symMv)) killed.add(symMv);
+    }
+    if (killed.size) {
+      for (const ch of children) {
+        if (ch.move !== PASS && killed.has(ch.move)) ch.prior = 0;
+      }
+    }
+  }
+}
+
+/* ==================== 最终选点:noisePruning → valueWeight → LCB → 温度 ==================== */
+function chooseFinalMove(root, tEff) {
+  const live = (root.children ?? []).filter((ch) => (ch.edgeVisits > 0 || (ch.prior ?? 0) > 0));
+  if (!live.length) return PASS;
+  const scored = !!root.nn && root.nn.hasScore;
+
+  /* 权重起点:边缩放权重(getChildWeight 口径)+ 效用取节点全局均值 */
+  const W = live.map((ch) => {
+    const n = ch.node;
+    if (!n || n.weight <= 0 || n.visits <= 0) return 0;
+    return n.weight * (ch.edgeVisits / Math.max(n.visits, 1));
+  });
+  const U = live.map((ch) => {
+    const n = ch.node;
+    return n && n.weight > 0 ? n.util / n.weight : 0;
+  });
+
+  if (scored && live.length > 1) {
+    const order = live.map((_, i) => i).sort((a, b) => (live[b].prior ?? 0) - (live[a].prior ?? 0));
+    let uSum = 0, wSum = 0, pSum = 0;
+    for (const i of order) {
+      const u = U[i], wOld = W[i], p = Math.max(live[i].prior ?? 0, 1e-30);
+      if (wSum > 0 && pSum > 0) {
+        const gap = uSum / wSum - u;
+        if (gap > 0) {
+          const share = wSum * p / pSum;
+          if (wOld > 2 * share) {
+            W[i] = wOld - (wOld - 2 * share) * (1 - Math.exp(-gap / NOISE_PRUNE_SCALE));
+          }
+        }
+      }
+      uSum += U[i] * W[i]; wSum += W[i]; pSum += p;
+    }
+  }
+
+  if (scored && VALUE_WEIGHT_EXP > 0 && live.length > 1) {
+    const stdevs = new Array(live.length);
+    let total = 0, simpleSum = 0;
+    for (let i = 0; i < live.length; i++) {
+      total += W[i];
+      const prec = 1.5 * Math.sqrt(W[i]);
+      simpleSum += U[i] * W[i];
+      stdevs[i] = Math.sqrt(1e-8 + 1 / Math.max(prec, 1e-12));
+    }
+    if (total > 0) {
+      const simple = simpleSum / total;
+      let newTotal = 0;
+      for (let i = 0; i < live.length; i++) {
+        if (W[i] <= 0) continue;
+        const p = t3cdf((U[i] - simple) / stdevs[i]) + 1e-4;
+        W[i] *= Math.pow(p, VALUE_WEIGHT_EXP);
+        newTotal += W[i];
+      }
+      if (newTotal > 0) {
+        const f = total / newTotal;
+        for (let i = 0; i < live.length; i++) W[i] *= f;
+      }
+    }
+  }
+
+  {
+    const radius = new Array(live.length).fill(0);
+    const lcb = new Array(live.length).fill(-Infinity);
+    let refW = 0, refG = -Infinity, bestIdx = -1;
+    for (let i = 0; i < live.length; i++) {
+      const n = live[i].node;
+      const g = W[i] * Math.max(0, (n ? n.visits : 0) - 1) / Math.max(1, n ? n.visits : 1) + 2 * (live[i].prior ?? 0);
+      if (g > refG) { refG = g; refW = W[i]; }
+    }
+    for (let i = 0; i < live.length; i++) {
+      const n = live[i].node;
+      if (!n || n.weight <= 0) { radius[i] = 2 * UTILITY_RADIUS * LCB_STDEVS; lcb[i] = -Infinity; continue; }
+      const w = n.weight, wsq = n.weightSq;
+      const uAvg = n.util / w;
+      const ess0 = w * w / Math.max(wsq, 1e-300);
+      const priorW = w / Math.max(ess0 * ess0 * ess0, 1e-300);
+      let uSqAvg = Math.max(n.utilSq / w, uAvg * uAvg + 1e-8);
+      uSqAvg = (uSqAvg * w + (uSqAvg + UTILITY_RADIUS * UTILITY_RADIUS) * priorW) / (w + priorW);
+      const wAdj = w + priorW, wsqAdj = wsq + priorW * priorW;
+      const ess = wAdj * wAdj / wsqAdj;
+      const variance = Math.max(uSqAvg - uAvg * uAvg, 0);
+      radius[i] = LCB_STDEVS * Math.sqrt(variance / Math.max(ess, 1e-300));
+      lcb[i] = uAvg - radius[i];
+      if (W[i] >= LCB_MIN_PROP * refW && (bestIdx < 0 || lcb[i] > lcb[bestIdx])) bestIdx = i;
+    }
+    if (bestIdx >= 0) {
+      let adjusted = W[bestIdx];
+      for (let i = 0; i < live.length; i++) {
+        if (i === bestIdx) continue;
+        const excess = lcb[bestIdx] - lcb[i];
+        if (excess <= 0) continue;
+        const rf = (radius[i] + excess) / (radius[i] + 0.2 * excess);
+        const lb = rf * rf * W[i];
+        if (lb > adjusted) adjusted = lb;
+      }
+      W[bestIdx] = adjusted;
+    }
+  }
+
+  let arg = 0;
+  for (let i = 1; i < live.length; i++) if (W[i] > W[arg]) arg = i;
+  if (tEff > 1e-4 && W[arg] > 0) {
+    const logMax = Math.log(W[arg]);
+    let sum = 0;
+    const wts = W.map((w) => {
+      if (w <= 0) return 0;
+      const x = Math.exp((Math.log(w) - logMax) / tEff);
+      sum += x;
+      return x;
+    });
+    if (sum > 0) {
+      let r = Math.random() * sum;
+      for (let i = 0; i < live.length; i++) {
+        r -= wts[i];
+        if (r < 0) { arg = i; break; }
+      }
+    }
+  }
+  return live[arg].move;
+}
