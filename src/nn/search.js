@@ -1,6 +1,19 @@
 /* ============================================================
  * AetherGo NN 版异步 PUCT 搜索 —— v4:图搜索(useGraphSearch,最终选点/效用同 v3)
  *
+ * == v4.2(2026-10-06):重算式节点统计(KataGo recomputeNodeStats 移植)==
+ *   - 节点统计不再沿路径累积叶值:每次回传后自叶向根逐节点从「子边统计 +
+ *     自身 NN 评估」重算 —— 子权重 = getChildWeight(边分摊),good 子按先验序
+ *     过 pruneNoiseWeight + valueWeight t3 降权(终选同款公式,搜索期即生效),
+ *     加权混合子均值,再并入自身评估一份(不确定度权重)。
+ *     Q 由此成为向网络评估收缩的稳定估计(少访 ≈ 自身评估,多访 ≈ 良序子树
+ *     均值),坏子不再稀释父值 —— 消除累积式的「探索噪声沉淀」。
+ *   - 虚拟损失移出统计:纯计数器,选点期混合效用向 ±R + 分母膨胀
+ *     (getExploreSelectionValueOfChild 同款),回传统计保持纯净可重算。
+ *   - 终局值权重 = uncertaintyMaxWeight(KataGo addLeafValue 终局口径)。
+ *   - 回传统计一律加权(util/wl/utilSq × weight;v4.1 前分子不加权,Q 幅度
+ *     被均权压缩 → 劈分偏均匀,2026-10-06 差分实锤后修正)。
+ *
  * == v4.1(2026-10-04):单槽管线 + 批回传叶盘面修复 ==
  *   - 单槽管线(双并行):GPU 估值第 N 批时,主循环同步攒第 N+1 批;估值慢则
  *     攒完在 await 处等。KataGo 多线程「线程停在叶上等 NN」的单线程投影 ——
@@ -42,7 +55,8 @@
  *   认输(worker 层,−0.90 连续 3 手)。
  *
  * == 与 KataGo 的已记录偏差 ==
- *   - maybeCatchUpEdgeVisits(边访问追平加速)未实现:单线程下收益小;
+ *   - maybeCatchUpEdgeVisits(边访问追平加速)已实现但默认关闭(A/B 存疑,
+ *     见 ENABLE_CATCHUP 注);
  *   - 循环到达即终止(KataGo)改为选点跳过在途节点(等价且少浪费一次下降);
  *   - 转置子树的着法合法性按首访路径生成,不按新路径重查(KataGo 同);
  *   - 根键 = fnv(整局着法)+状态键(KataGo 为逐手链式重算,语义等价)。
@@ -301,7 +315,7 @@ export async function nnSearchBest(bd, side, opt = {}) {
     util: 0, utilSq: 0, wl: 0,
     scoreMean: 0, scoreMeanSq: 0,
     nn: null, terminal: false, terminalSem: null,
-    chainKey, evalPending: false, _gc: 0,
+    chainKey, evalPending: false, vl: 0, _gc: 0,
   });
 
   /* ---- 语义值管道(同 v3) ----
@@ -366,38 +380,164 @@ export async function nnSearchBest(bd, side, opt = {}) {
     reused = 0;
   }
 
-  /* ---- 单批虚拟损失(节点级;含根) ---- */
-  const virtualApply = (path) => {
-    for (let i = 0; i < path.length; i++) {
-      const n = path[i].node;
-      n.visits++; n.weight += 1; n.util -= 1; n.utilSq += 1;
-    }
+  /* ---- 虚拟损失(v4.2:纯计数器,不进统计) ----
+   * 攒批期间对在途路径子计数;选点期按 KataGo getExploreSelectionValueOfChild
+   * (searchexplorehelpers.cpp:140)混合:效用向「对行棋方最坏」的 ±utilityRadius
+   * 收缩 + PUCT 分母膨胀。回传时计数归零,统计保持可重算的纯净口径。 */
+  const applyVirtualLoss = (path) => {
+    for (let i = 1; i < path.length; i++) path[i].node.vl++;
   };
-  const virtualRemove = (path) => {
-    for (let i = 0; i < path.length; i++) {
-      const n = path[i].node;
-      n.visits--; n.weight -= 1; n.util += 1; n.utilSq -= 1;
-    }
+  const removeVirtualLoss = (path) => {
+    for (let i = 1; i < path.length; i++) path[i].node.vl--;
   };
 
-  /* ---- 回传(节点统计全局累计;边访问在下降时已计) ---- */
-  function backup(path, leafSide, sem, weight) {
+  /* ---- 重算式节点统计(KataGo recomputeNodeStats,searchupdatehelpers.cpp:167)----
+   * 节点 util/wl 存「走进节点那方」视角(沿用旧约定),scoreMean 恒白视角;
+   * 内部按 KataGo 白视角公式计算后统一翻转。u² 与视角无关。
+   * 权威语义:统计 = Σ_good wAdj·子均值 + 自身评估×不确定度权重,
+   * wAdj 先经 pruneNoiseWeight(先验序)再 valueWeight t3 降权归一。 */
+  function initLeafStats(node, sem) {
+    /* 叶首评:自身评估一份(searchnnhelpers.cpp:171 addCurrentNNOutputAsLeafValue
+     * assumeNoExistingWeight=true,REPLACE 语义) */
+    const uw = uncertaintyWeight(sem);
     const uW = utilityWhite(sem);
-    const leafWhite = leafSide === WHITE;
-    const uLeaf = leafWhite ? uW : -uW;
-    const wlLeaf = leafWhite ? sem.wlW : -sem.wlW;
-    for (let i = 0; i < path.length; i++) {
-      const n = path[i].node;
-      const sign = ((n.side ^ 1) === leafSide) ? 1 : -1;
-      n.visits++;
-      n.weight += weight; n.weightSq += weight * weight;
-      n.util += sign * uLeaf; n.utilSq += uLeaf * uLeaf;
-      n.wl += sign * wlLeaf;
-      if (sem.hasScore) { n.scoreMean += sem.mW * weight; n.scoreMeanSq += sem.mW * sem.mW * weight; }
-    }
+    const flip = (node.side ^ 1) === WHITE ? 1 : -1;
+    node.visits = 1;
+    node.weight = uw; node.weightSq = uw * uw;
+    node.util = flip * uW * uw;
+    node.utilSq = uW * uW * uw;
+    node.wl = flip * sem.wlW * uw;
+    node.scoreMean = sem.hasScore ? sem.mW * uw : 0;
+    node.scoreMeanSq = sem.hasScore ? sem.mW * sem.mW * uw : 0;
   }
-  const finishNow = (e, sem, weight = 1) => {
-    backup(e.path, e.node.side, sem, weight);
+  function accumulateSelfEval(node) {
+    /* 死端:自身评估再计一份(search.cpp:1408 addCurrentNNOutputAsLeafValue
+     * accumulate 语义 —— 全子被禁时节点困住计访) */
+    const sem = node.nn;
+    if (!sem) return;
+    const uw = uncertaintyWeight(sem);
+    const uW = utilityWhite(sem);
+    const flip = (node.side ^ 1) === WHITE ? 1 : -1;
+    node.visits++;
+    node.weight += uw; node.weightSq += uw * uw;
+    node.util += flip * uW * uw;
+    node.utilSq += uW * uW * uw;
+    node.wl += flip * sem.wlW * uw;
+    if (sem.hasScore) { node.scoreMean += sem.mW * uw; node.scoreMeanSq += sem.mW * sem.mW * uw; }
+  }
+  function accumulateTerminal(node, sem) {
+    /* 终局值确定 → 满权重(search.cpp:1273,useUncertainty 时 = uncertaintyMaxWeight) */
+    const uw = UNCERT_MAX_W;
+    const uW = utilityWhite(sem);
+    const flip = (node.side ^ 1) === WHITE ? 1 : -1;
+    node.visits++;
+    node.weight += uw; node.weightSq += uw * uw;
+    node.util += flip * uW * uw;
+    node.utilSq += uW * uW * uw;
+    node.wl += flip * sem.wlW * uw;
+    node.scoreMean += sem.mW * uw; node.scoreMeanSq += sem.mW * sem.mW * uw;
+  }
+  function recomputeStats(n) {
+    if (n.terminal || !n.nn || !n.children) return;
+    /* good 子收集 + 边分摊权重(getChildWeight 口径;searchupdatehelpers.cpp:192) */
+    const good = [];
+    let currentTotal = 0, thisVisits = 1;                 // 1 = 自身访问
+    for (const ch of n.children) {
+      const c = ch.node;
+      if (!c || c.visits <= 0 || c.weight <= 0 || ch.edgeVisits <= 0) continue;
+      const wAdj = c.weight * (ch.edgeVisits / c.visits);
+      good.push({ c, wAdj, prior: Math.max(ch.prior, 0) });
+      currentTotal += wAdj;
+      thisVisits += ch.edgeVisits;
+    }
+    if (!good.length) {
+      /* 无 good 子:统计回落为自身评估一份(KataGo 空子和循环同款) */
+      initLeafStats(n, n.nn);
+      n.visits = thisVisits;
+      return;
+    }
+    good.sort((a, b) => b.prior - a.prior);               // KataGo 子按先验序(noise 剪枝假设)
+    for (const g of good) {
+      const c = g.c, flip = (c.side ^ 1) === WHITE ? 1 : -1;
+      g.uW = flip * (c.util / c.weight);
+      g.wlW = flip * (c.wl / c.weight);
+      g.mW = c.scoreMean / c.weight;
+      g.mSqW = c.scoreMeanSq / c.weight;
+      g.uSqW = c.utilSq / c.weight;
+      g.selfU = n.side === WHITE ? g.uW : -g.uW;          // 选子者(本节点行棋方)视角
+    }
+    /* pruneNoiseWeight(searchupdatehelpers.cpp:521):劣于前缀均值的子,
+     * 超出先验份额 2 倍的部分按效用差距指数削权 */
+    {
+      let uSum = 0, wSum = 0, pSum = 0;
+      for (const g of good) {
+        const u = g.selfU, oldW = g.wAdj, p = g.prior;
+        let newW = oldW;
+        if (wSum > 0 && pSum > 0) {
+          const gap = uSum / wSum - u;
+          if (gap > 0) {
+            const share = wSum * p / pSum;
+            if (oldW > 2 * share) newW = oldW - (oldW - 2 * share) * (1 - Math.exp(-gap / NOISE_PRUNE_SCALE));
+          }
+        }
+        uSum += u * newW; wSum += newW; pSum += p;
+        g.wAdj = newW;
+      }
+      currentTotal = wSum;
+    }
+    /* downweightBadChildrenAndNormalizeWeight(searchupdatehelpers.cpp:428;
+     * GTP 无根噪声 → subtract/prune=0,仅 valueWeight t3 降权 + 归一到降权前总量) */
+    {
+      let simpleSum = 0;
+      for (const g of good) simpleSum += g.selfU * g.wAdj;
+      const simple = simpleSum / currentTotal;
+      let newTotal = 0;
+      for (const g of good) {
+        const prec = 1.5 * Math.sqrt(g.wAdj);
+        const stdev = Math.sqrt(1e-8 + 1 / Math.max(prec, 1e-12));
+        g.wAdj *= Math.pow(t3cdf((g.selfU - simple) / stdev) + 1e-4, VALUE_WEIGHT_EXP);
+        newTotal += g.wAdj;
+      }
+      if (newTotal > 0) {
+        const f = currentTotal / newTotal;
+        for (const g of good) g.wAdj *= f;
+      }
+    }
+    /* 加权求和(子均值,白视角)+ 自身评估一份(searchupdatehelpers.cpp:269) */
+    let uSum = 0, wlSum = 0, mSum = 0, mSqSum = 0, uSqSum = 0, wSqSum = 0;
+    for (const g of good) {
+      const c = g.c, scaling = g.wAdj / c.weight;
+      uSum += g.wAdj * g.uW;
+      wlSum += g.wAdj * g.wlW;
+      mSum += g.wAdj * g.mW;
+      mSqSum += g.wAdj * g.mSqW;
+      uSqSum += g.wAdj * g.uSqW;
+      wSqSum += scaling * scaling * c.weightSq;
+    }
+    {
+      const sem = n.nn;
+      const uw = uncertaintyWeight(sem);
+      const uW = utilityWhite(sem);
+      uSum += uW * uw; wlSum += sem.wlW * uw;
+      if (sem.hasScore) { mSum += sem.mW * uw; mSqSum += sem.mW * sem.mW * uw; }
+      uSqSum += uW * uW * uw;
+      wSqSum += uw * uw;
+      currentTotal += uw;
+    }
+    /* 写回(翻转回「走进节点那方」视角) */
+    const flip = (n.side ^ 1) === WHITE ? 1 : -1;
+    n.visits = thisVisits;
+    n.weight = currentTotal;
+    n.util = flip * uSum;
+    n.utilSq = uSqSum;
+    n.wl = flip * wlSum;
+    n.scoreMean = mSum;
+    n.scoreMeanSq = mSqSum;
+    n.weightSq = wSqSum;
+  }
+  const finishNow = (e) => {
+    accumulateTerminal(e.node, e.node.terminalSem);
+    for (let i = e.path.length - 2; i >= 0; i--) recomputeStats(e.path[i].node);
     for (let i = e.path.length - 1; i >= 1; i--) unmake(bd, e.path[i].move, e.path[i].tok);
   };
 
@@ -508,14 +648,22 @@ export async function nnSearchBest(bd, side, opt = {}) {
         if (ch.prior <= 0) continue;                          // 对称剪枝置零
         const n = ch.node;
         if (n && (n._ps === pathStamp || n.evalPending)) continue;   // 在途/评估中:跳过(循环守卫)
-        let q, denom;
-        if (!n) { q = fpu; denom = 1; }                       // 未走过的边:FPU
+        let q, cw;
+        if (!n) { q = fpu; cw = 0; }                          // 未走过的边:FPU
         else {
           q = (n.visits > 0 && n.weight > 0) ? n.util / n.weight : fpu;
           /* 边访问缩放:该边分摊的权重(getChildWeight 口径) */
-          denom = 1 + n.weight * (ch.edgeVisits / Math.max(n.visits, 1));
+          cw = n.weight * (ch.edgeVisits / Math.max(n.visits, 1));
+          /* 虚拟损失:效用向 ±utilityRadius 混合 + 分母膨胀
+           * (getExploreSelectionValueOfChild,searchexplorehelpers.cpp:141) */
+          if (n.vl > 0) {
+            const vlU = (cur.side === WHITE) ? -UTILITY_RADIUS : UTILITY_RADIUS;
+            const frac = n.vl / (n.vl + Math.max(0.25, cw));
+            q = q + (vlU - q) * frac;
+            cw += n.vl;
+          }
         }
-        const v = q + explore * ch.prior / denom;
+        const v = q + explore * ch.prior / (1 + cw);
         if (v > bestV) { bestV = v; best = ch; }
       }
       if (!best) break;
@@ -550,10 +698,8 @@ export async function nnSearchBest(bd, side, opt = {}) {
         best.node = node;                                     // 转置接入或新建
         /* 转置边访问追平(KataGo maybeCatchUpEdgeVisits,search.cpp:1552;
          * GTP 配置 graphSearchCatchUpLeakProb=0 即总是追平):共享子节点的
-         * 总访问超过本边记录时,本次 playout 只补 1 个边访问即折返。
-         * 折返不是纯记账:KataGo 节点统计每手从子边重算,边访问即信息;
-         * 本引擎 util 靠回传累积,故折返时把子节点当前均值(wl/scoreMean,
-         * 经其他父路径算出)合成为一次回传注入本路径 —— 语义等价 */
+         * 总访问超过本边记录时,本次 playout 只补 1 个边访问即折返,
+         * 主循环侧随后重算本父节点统计(边访问即信息,重算式统计下语义同源) */
         if (ENABLE_CATCHUP && node.nn && node.visits > best.edgeVisits) {
           unmake(bd, best.move, tok);         // 本层已 make,折返前必须退回
           best.edgeVisits++;
@@ -603,6 +749,7 @@ export async function nnSearchBest(bd, side, opt = {}) {
     if (!root.nn) {
       root.nn = sem;
       expand(root, out.policy, out.policyPass, bd, genLegal(bd, side));
+      initLeafStats(root, sem);                 // 根统计 = 自身评估一份(KataGo initNodeNNOutput)
     } else {
       refreshRootPriors(out.policy, out.policyPass, genLegal(bd, side));
     }
@@ -631,19 +778,22 @@ export async function nnSearchBest(bd, side, opt = {}) {
     return toks;
   };
 
-  /* ---- 批回传 + 进度上报(单槽管线保证严格按批序调用) ---- */
+  /* ---- 批回传 + 进度上报(单槽管线保证严格按批序调用) ----
+   * v4.2:撤虚拟损失计数 → 展开叶 → 叶统计 = 自身评估一份 → 自叶向根
+   * 逐节点重算(updateStatsAfterPlayout 的单线程投影)。 ---- */
   const applyBatch = (pending, outs) => {
     nnCalls++;
     for (let i = 0; i < pending.length; i++) {
       const p = pending[i], out = outs[i];
-      virtualRemove(p.path);
+      removeVirtualLoss(p.path);
       const toks = remakePath(p.path);
       expand(p.node, out.policy, out.policyPass, bd, p.legalMoves);
       for (let k = p.path.length - 1; k >= 1; k--) unmake(bd, p.path[k].move, toks[k - 1]);
       const sem = semOf(out, p.node.side);
       p.node.nn = sem;
       p.node.evalPending = false;
-      backup(p.path, p.node.side, sem, uncertaintyWeight(sem));
+      initLeafStats(p.node, sem);
+      for (let k = p.path.length - 2; k >= 0; k--) recomputeStats(p.path[k].node);
       storeEval(p.key, out);                  // λ=1 口径原样入缓存(root 不走缓存)
       iters++;
     }
@@ -679,30 +829,23 @@ export async function nnSearchBest(bd, side, opt = {}) {
       && (inflight ? !inflight.done : pending.length < minBatch)) {
     const e = descend();
     if (e.catchUpChild) {
-      /* 追平折返:子节点当前均值合成一次回传(转置信息经其他父路径已算出,
-       * 注入本路径的祖先统计),计一次访问,无推理。 */
-      const c = e.catchUpChild;
-      if (c.weight > 0) {
-        const wlAvg = c.wl / c.weight;                       // 走进子那方视角 = 折返父的行棋方
-        const parentSide = e.path[e.path.length - 1].node.side;
-        const mW = c.scoreMean / c.weight;                   // 白方视角
-        const vW = Math.max(c.scoreMeanSq / c.weight - mW * mW, 0.04);
-        const sem = {
-          wlW: parentSide === WHITE ? wlAvg : -wlAvg,
-          mW, sdW: Math.sqrt(vW), stWL: 0.15, stScore: 1.8, hasScore: true,
-        };
-        backup(e.path, c.side, sem, uncertaintyWeight(sem));
-      }
+      /* 追平折返(KataGo maybeCatchUpEdgeVisits → updateStatsAfterPlayout(父),
+       * search.cpp:1468):边访问已在下降时计入,此处仅重算父统计,计一次访问,
+       * 无推理。旧版「合成回传」在重算式统计下无意义(会被重算覆盖),删除。 */
+      recomputeStats(e.path[e.path.length - 1].node);
       for (let i = e.path.length - 1; i >= 1; i--) unmake(bd, e.path[i].move, e.path[i].tok);
       iters++;
       continue;
     }
     if (e.node.terminal) {
-        finishNow(e, e.node.terminalSem, 1);
+        finishNow(e);
         iters++;
         continue;
       }
       if (e.node.nn) {                                        // 死端(全子被跳过:在途/转置回边)
+        /* KataGo search.cpp:1408:全子被禁时自身评估再计一份,祖先照常重算 */
+        accumulateSelfEval(e.node);
+        for (let i = e.path.length - 2; i >= 0; i--) recomputeStats(e.path[i].node);
         for (let i = e.path.length - 1; i >= 1; i--) unmake(bd, e.path[i].move, e.path[i].tok);
         if (pending.length > 0) break;                        // 已攒半批:立即结算
         if (inflight) { await settleInflight(); continue; }   // 在途饱和:收批解饱和,不烧预算
@@ -717,12 +860,11 @@ export async function nnSearchBest(bd, side, opt = {}) {
       if (cached) {
         cacheHits++;
         const sem = semOf(cached, e.node.side);
-        virtualApply(e.path);
         expand(e.node, cached.policy, cached.policyPass, bd, genLegal(bd, e.node.side));
         e.node.nn = sem;
         e.node.evalPending = false;
-        virtualRemove(e.path);
-        backup(e.path, e.node.side, sem, uncertaintyWeight(sem));
+        initLeafStats(e.node, sem);
+        for (let k = e.path.length - 2; k >= 0; k--) recomputeStats(e.path[k].node);
         for (let i = e.path.length - 1; i >= 1; i--) unmake(bd, e.path[i].move, e.path[i].tok);
         iters++;
         continue;
@@ -732,7 +874,7 @@ export async function nnSearchBest(bd, side, opt = {}) {
         legalMoves: genLegal(bd, e.node.side),
         spatial: Float32Array.from(f.spatial), global: Float32Array.from(f.global),
       });
-      virtualApply(e.path);
+      applyVirtualLoss(e.path);
       for (let i = e.path.length - 1; i >= 1; i--) unmake(bd, e.path[i].move, e.path[i].tok);
     }
 
