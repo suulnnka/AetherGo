@@ -69,25 +69,45 @@ const search = (bd, opts) => nnSearchBest(bd, BLACK, {
   const duel = boardFrom([[0, 0, 'X'], [0, 2, 'O']]);
   check('6c 贴两色的空域是单官', countDame(duel) === N2 - 2, String(countDame(duel)));
 
-  /* 行为 A/B:强 pass 先验 + 盘上有单官 → 压制生效,选棋盘着法;
-   * 关掉 fillDameBeforePass → pass 先验(0.95)直接当选。 */
+  /* 行为:2026-10-05 对齐 KataGo 面积计分口径,pass 先验不再压制
+   * (KataGo shouldSuppressPass 仅数目法生效)—— 强 pass 先验无论有无单官
+   * 都直接当选,何时停一手交给网络值 + 双停终局值。 */
   const hot = [[sq(9, 9), 20], [sq(9, 10), 19]];
   const on = await nnSearchBest(duel, BLACK, {
     session: makeStub({ hot, passLogit: 25 }), visits: 60, batch: 4,
     reuseTree: false, allowResign: false,
   });
-  check('6d 有单官时不停一手(压制生效)', on.move !== PASS, `move=${on.move}`);
-  const off = await nnSearchBest(duel, BLACK, {
-    session: makeStub({ hot, passLogit: 25 }), visits: 60, batch: 4,
-    reuseTree: false, allowResign: false, fillDameBeforePass: false,
-  });
-  check('6e 关掉压制后强 pass 先验当选', off.move === PASS, `move=${off.move}`);
-  /* 黑一子天元(无单官):pass 不被压制,强 pass 先验照常当选 */
+  check('6d 单官在盘时强 pass 先验也当选(面积计分不压制)', on.move === PASS, `move=${on.move}`);
   const clean = await nnSearchBest(tenji, BLACK, {
     session: makeStub({ hot, passLogit: 25 }), visits: 60, batch: 4,
     reuseTree: false, allowResign: false,
   });
-  check('6f 无单官时 pass 不受压制', clean.move === PASS, `move=${clean.move}`);
+  check('6f 无单官时强 pass 先验当选', clean.move === PASS, `move=${clean.move}`);
+  const noPass = await nnSearchBest(duel, BLACK, {
+    session: makeStub({ hot }), visits: 60, batch: 4,
+    reuseTree: false, allowResign: false,
+  });
+  check('6g 无 pass 先验时照常下棋盘点着法', noPass.move !== PASS, `move=${noPass.move}`);
+
+  /* 6h 终选 pass 守门(shouldSuppressPass 移植):强 pass 先验 + 可下的盘上着法
+   * (ownership 非对方铁地)→ 守门清零 pass 权重,选盘上着法;
+   * 全盘皆对方铁地深处 → 守门不触发,pass 当选。 */
+  const ownStub = (ownVal) => ({ async evalBatch(items) {
+    return items.map(() => {
+      const policy = new Float32Array(N2).fill(-20);
+      for (const [p, v] of hot) policy[p] = v;
+      const own = new Float32Array(N2).fill(ownVal);
+      return { policy, policyPass: 21, winLoss: 0.0, ownership: own };
+    });
+  } });
+  const guarded = await nnSearchBest(duel, BLACK, {
+    session: ownStub(0.5), visits: 60, batch: 4, reuseTree: false, allowResign: false,
+  });
+  check('6h 可下点存在时守门压掉强 pass 先验', guarded.move !== PASS, `move=${guarded.move}`);
+  const freePass = await nnSearchBest(duel, BLACK, {
+    session: ownStub(-2.5), visits: 60, batch: 4, reuseTree: false, allowResign: false,  /* pretanh -2.5 → tanh≈-0.99 */
+  });
+  check('6h2 全盘对方铁地时守门放行 pass', freePass.move === PASS, `move=${freePass.move}`);
 }
 
 /* ==================== 5. NN 评估缓存 ==================== */

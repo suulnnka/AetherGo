@@ -38,7 +38,7 @@
  *   效用函数(winLoss+static/dynamic 目差)、FPU(按已访问 policy 混合)、
  *   不确定度加权、真实 LCB(ESS)、noisePruning、valueWeightExponent(t₃ CDF)、
  *   cpuct 方差因子、根评估重算(λ=0.2)、根对称剪枝、无用着剪枝、
- *   fillDameBeforePass、批量推理(8 叶+虚拟损失)、温度选点(调用方传入+半衰)、
+ *   批量推理(8 叶+虚拟损失)、温度选点(调用方传入+半衰)、
  *   认输(worker 层,−0.90 连续 3 手)。
  *
  * == 与 KataGo 的已记录偏差 ==
@@ -81,7 +81,11 @@ const NOISE_PRUNE_SCALE = 0.15;
 const LCB_STDEVS = 5.0, LCB_MIN_PROP = 0.15;
 const UTILITY_RADIUS = 1.0 + STATIC_F + DYNAMIC_F;
 const PRIOR_FLOOR = 1e-4;
-const PASS_SUPPRESS = 1e-3;
+/* 2026-10-05 移除 PASS_SUPPRESS(pass 先验压制):KataGo 的 shouldSuppressPass
+ * (fillDameBeforePass)只在数目法(TERRITORY)下生效,面积计分完全不压制 ——
+ * 填单官本身涨目,网络值自己学会何时停。旧版用 countDame>0 无条件压制,
+ * 且口径过宽(争议区/双活也计入),已定局面永不 pass、填到 400+ 手
+ * (真实对局差分:game1 ply380 KataGo pass 拿 26 访,我方 pass 恒 0 访)。 */
 const ROOT_OPTIMISM = 0.2;              // rootPolicyOptimism(GTP;树内 λ=1.0)
 const REP_BOUND = 11;                   // graphSearchRepBound(GTP)
 /* 转置边访问追平开关:合成回传版在 A/B 自对弈中表现存疑(2026-10-05),
@@ -413,7 +417,8 @@ export async function nnSearchBest(bd, side, opt = {}) {
     const probs = new Array(logits.length);
     for (let i = 0; i < logits.length; i++) { const e = Math.exp(logits[i] - mx); probs[i] = e; sum += e; }
     for (let i = 0; i < probs.length; i++) probs[i] /= sum;
-    if (opt.fillDameBeforePass !== false && countDame(leafBd) > 0) probs[passIdx] *= PASS_SUPPRESS;
+    /* pass 先验不压制:面积计分口径(KataGo shouldSuppressPass 仅数目法生效,
+     * 见文件头 PASS_SUPPRESS 注);何时停一手交给网络值 + 双停终局值 */
     let keepSum = 0;
     const keep = [];
     for (let i = 0; i < moves.length; i++) {
@@ -444,7 +449,6 @@ export async function nnSearchBest(bd, side, opt = {}) {
     const probs = logits.map((l) => { const e = Math.exp(l - mx); sum += e; return e; });
     let keepSum = 0;
     for (let k = 0; k < probs.length; k++) {
-      if (mvs[k] === PASS && opt.fillDameBeforePass !== false && countDame(bd) > 0) probs[k] *= PASS_SUPPRESS;
       if (mvs[k] !== PASS && probs[k] / sum < PRIOR_FLOOR) probs[k] = 0;
       keepSum += probs[k];
     }
@@ -580,9 +584,11 @@ export async function nnSearchBest(bd, side, opt = {}) {
   }
 
   /* ---- 主循环前置:根评估(λ=0.2)→ recentScoreCenter + 根先验 + 环快照 ---- */
+  let rootOwnPre = null;                     // 根评估 ownership(行棋方视角 pretanh),终选 pass 守门用
   {
     const f = encodeFeatures(bd, side, { recentMoves: rootRecent, komi, outSpatial: spBuf, outGlobal: glBuf });
     const [out] = await evalBatch([{ spatial: f.spatial, global: f.global, optimism: ROOT_OPTIMISM }]);
+    rootOwnPre = out.ownership ?? null;
     const sem = semOf(out, side);
     const expectedScore = (root.visits > 0 && root.weight > 0)
       ? root.scoreMean / root.weight : sem.mW;
@@ -740,7 +746,13 @@ export async function nnSearchBest(bd, side, opt = {}) {
 
   /* ==================== 最终选点(edge 缩放权重;精修同 v3) ==================== */
   const tEff = effectiveTemperature(temperature, temperatureHalflife, rootRecent.length);
-  const move = chooseFinalMove(root, tEff);
+  /* 根终选 pass 守门(KataGo shouldSuppressPass,searchhelpers.cpp:443 语义;
+   * KataGo 仅数目法启用,本引擎面积计分下作为产品护栏常开 —— 学生网 pass
+   * 价值未标定,2026-10-05 A/B:纯靠网络值会提前停一手,75 手即认输级崩盘)。
+   * 判据:存在「非对方铁地深处、访问充分、效用/目差不比 pass 差太多」的
+   * 盘上着法 → pass 的选择权重清零。 */
+  const suppressPass = rootOwnPre && rootShouldKeepFilling(root, rootOwnPre);
+  const move = chooseFinalMove(root, tEff, suppressPass);
   const best = pickBest(root);
   /* 根加权胜率:全部子按边分摊权重的效用均值 —— 比旧口径(最佳子 q)
    * 少一层选点乐观偏差,认输判据与 UI 胜率据此不再系统性虚高
@@ -832,8 +844,47 @@ function pruneSymmetricRootMoves(children, bd) {
 }
 
 /* ==================== 最终选点:noisePruning → valueWeight → LCB → 温度 ==================== */
-function chooseFinalMove(root, tEff) {
-  const live = (root.children ?? []).filter((ch) => (ch.edgeVisits > 0 || (ch.prior ?? 0) > 0));
+/* shouldSuppressPass 移植:有值得下的盘上着法则压 pass(调用点见 nnSearchBest 终选)。
+ * ownPre:根评估 ownership(行棋方视角 pretanh);q 口径为「走进子那方」= 根行棋方,
+ * 越大越好不分颜色;scoreMean 恒白视角,按行棋方镜像比较(KataGo 同款双门限)。 */
+function rootShouldKeepFilling(root, ownPre) {
+  const chs = root.children ?? [];
+  let passCh = null;
+  for (const ch of chs) if (ch.move === PASS && ch.node) { passCh = ch; break; }
+  if (!passCh || passCh.node.weight <= 1e-10) return false;
+  const passW = passCh.node.weight * (passCh.edgeVisits / Math.max(passCh.node.visits, 1));
+  const passQ = passCh.node.util / passCh.node.weight;
+  const passM = passCh.node.scoreMean / passCh.node.weight;
+  const EXTREME = 0.95;
+  const rOf = (p) => (p / N) | 0, cOf = (p) => p % N;
+  for (const ch of chs) {
+    if (ch.move === PASS || !ch.node || ch.node.weight <= 1e-10) continue;
+    const mv = ch.move;
+    const own = Math.tanh(ownPre[mv]);
+    if (own < -EXTREME) {
+      /* 对方铁地:四邻无一为我方铁地 → 深处死点,不算候选 */
+      const r = rOf(mv), c = cOf(mv);
+      let adjMine = false;
+      if (r > 0 && Math.tanh(ownPre[mv - N]) > EXTREME) adjMine = true;
+      if (r < N - 1 && Math.tanh(ownPre[mv + N]) > EXTREME) adjMine = true;
+      if (c > 0 && Math.tanh(ownPre[mv - 1]) > EXTREME) adjMine = true;
+      if (c < N - 1 && Math.tanh(ownPre[mv + 1]) > EXTREME) adjMine = true;
+      if (!adjMine) continue;
+    }
+    const w = ch.node.weight * (ch.edgeVisits / Math.max(ch.node.visits, 1));
+    if (ch.edgeVisits <= 500 && w <= 2 * Math.sqrt(passW)) continue;   // 访问不足:不作为证据
+    const q = ch.node.util / ch.node.weight;
+    const mW = ch.node.scoreMean / ch.node.weight;
+    /* q 为行棋方视角(大=好,不分颜色);mW 白视角按行棋方镜像 */
+    if (q > passQ - 0.1
+      && (root.side === WHITE ? mW > passM - 0.5 : mW < passM + 0.5)) return true;
+  }
+  return false;
+}
+
+function chooseFinalMove(root, tEff, suppressPass = false) {
+  const live = (root.children ?? []).filter((ch) =>
+    (ch.edgeVisits > 0 || (ch.prior ?? 0) > 0) && !(suppressPass && ch.move === PASS));
   if (!live.length) return PASS;
   const scored = !!root.nn && root.nn.hasScore;
 
