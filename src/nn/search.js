@@ -84,6 +84,9 @@ const PRIOR_FLOOR = 1e-4;
 const PASS_SUPPRESS = 1e-3;
 const ROOT_OPTIMISM = 0.2;              // rootPolicyOptimism(GTP;树内 λ=1.0)
 const REP_BOUND = 11;                   // graphSearchRepBound(GTP)
+/* 转置边访问追平开关:合成回传版在 A/B 自对弈中表现存疑(2026-10-05),
+ * 视角修复后默认关闭,待单独验证后再启 */
+const ENABLE_CATCHUP = false;
 
 const TWO_OVER_PI = 2 / Math.PI;
 const SQRT_AREA = Math.sqrt(N2);
@@ -297,12 +300,18 @@ export async function nnSearchBest(bd, side, opt = {}) {
     chainKey, evalPending: false, _gc: 0,
   });
 
-  /* ---- 语义值管道(同 v3) ---- */
-  const semOf = (out) => {
+  /* ---- 语义值管道(同 v3) ----
+   * ★ session 契约的 winLoss/scoreMean 是**行棋方**视角(nneval.cpp 权威:
+   * "the neural net gives us back the value from the perspective of the
+   * player",C++ 在后处理末尾按 nextPlayer==P_BLACK 整体取反转白方视角)。
+   * 本管道的 wlW/mW 一律白方视角 —— 按 stm 翻转。2026-10-05 差分调试实锤:
+   * 旧版漏翻,黑行棋叶的效用以反号进树,值信号半数损坏(棋力差距主因)。 */
+  const semOf = (out, stm) => {
+    const flip = stm === WHITE ? 1 : -1;
     const hasScore = Number.isFinite(out.scoreMean);
     return {
-      wlW: out.winLoss,
-      mW: hasScore ? out.scoreMean : 0,
+      wlW: flip * out.winLoss,
+      mW: flip * (hasScore ? out.scoreMean : 0),
       sdW: hasScore ? (out.scoreStdev ?? 0) : 0,
       stWL: out.shorttermWinlossError ?? 0,
       stScore: out.shorttermScoreError ?? 0,
@@ -531,6 +540,17 @@ export async function nnSearchBest(bd, side, opt = {}) {
           table.set(key, node);
         }
         best.node = node;                                     // 转置接入或新建
+        /* 转置边访问追平(KataGo maybeCatchUpEdgeVisits,search.cpp:1552;
+         * GTP 配置 graphSearchCatchUpLeakProb=0 即总是追平):共享子节点的
+         * 总访问超过本边记录时,本次 playout 只补 1 个边访问即折返。
+         * 折返不是纯记账:KataGo 节点统计每手从子边重算,边访问即信息;
+         * 本引擎 util 靠回传累积,故折返时把子节点当前均值(wl/scoreMean,
+         * 经其他父路径算出)合成为一次回传注入本路径 —— 语义等价 */
+        if (ENABLE_CATCHUP && node.nn && node.visits > best.edgeVisits) {
+          unmake(bd, best.move, tok);         // 本层已 make,折返前必须退回
+          best.edgeVisits++;
+          return { node: cur, path, recent, catchUpChild: node };
+        }
         best.edgeVisits++;
         node._ps = pathStamp;
         path.push({ node, move: best.move, tok });
@@ -540,6 +560,11 @@ export async function nnSearchBest(bd, side, opt = {}) {
         if (node.nn) continue;                                // 转置命中既有子树:继续下潜
         break;                                                // 新叶:待评估
       } else {
+        /* 既有边同理:边访问落后共享子节点总访问时,补 1 折返不下降 */
+        if (ENABLE_CATCHUP && best.node.nn && best.node.visits > best.edgeVisits) {
+          best.edgeVisits++;
+          return { node: cur, path, recent, catchUpChild: best.node };
+        }
         const tok = make(bd, best.move, cur.side);
         best.edgeVisits++;
         node = best.node;
@@ -558,7 +583,7 @@ export async function nnSearchBest(bd, side, opt = {}) {
   {
     const f = encodeFeatures(bd, side, { recentMoves: rootRecent, komi, outSpatial: spBuf, outGlobal: glBuf });
     const [out] = await evalBatch([{ spatial: f.spatial, global: f.global, optimism: ROOT_OPTIMISM }]);
-    const sem = semOf(out);
+    const sem = semOf(out, side);
     const expectedScore = (root.visits > 0 && root.weight > 0)
       ? root.scoreMean / root.weight : sem.mW;
     recentScoreCenter = expectedScore * (1 - CENTER_ZERO_W);
@@ -605,7 +630,7 @@ export async function nnSearchBest(bd, side, opt = {}) {
       const toks = remakePath(p.path);
       expand(p.node, out.policy, out.policyPass, bd, p.legalMoves);
       for (let k = p.path.length - 1; k >= 1; k--) unmake(bd, p.path[k].move, toks[k - 1]);
-      const sem = semOf(out);
+      const sem = semOf(out, p.node.side);
       p.node.nn = sem;
       p.node.evalPending = false;
       backup(p.path, p.node.side, sem, uncertaintyWeight(sem));
@@ -642,8 +667,27 @@ export async function nnSearchBest(bd, side, opt = {}) {
     while (pending.length < maxBatch
       && iters + (inflight ? inflight.pending.length : 0) + pending.length < budget
       && (inflight ? !inflight.done : pending.length < minBatch)) {
-      const e = descend();
-      if (e.node.terminal) {
+    const e = descend();
+    if (e.catchUpChild) {
+      /* 追平折返:子节点当前均值合成一次回传(转置信息经其他父路径已算出,
+       * 注入本路径的祖先统计),计一次访问,无推理。 */
+      const c = e.catchUpChild;
+      if (c.weight > 0) {
+        const wlAvg = c.wl / c.weight;                       // 走进子那方视角 = 折返父的行棋方
+        const parentSide = e.path[e.path.length - 1].node.side;
+        const mW = c.scoreMean / c.weight;                   // 白方视角
+        const vW = Math.max(c.scoreMeanSq / c.weight - mW * mW, 0.04);
+        const sem = {
+          wlW: parentSide === WHITE ? wlAvg : -wlAvg,
+          mW, sdW: Math.sqrt(vW), stWL: 0.15, stScore: 1.8, hasScore: true,
+        };
+        backup(e.path, c.side, sem, uncertaintyWeight(sem));
+      }
+      for (let i = e.path.length - 1; i >= 1; i--) unmake(bd, e.path[i].move, e.path[i].tok);
+      iters++;
+      continue;
+    }
+    if (e.node.terminal) {
         finishNow(e, e.node.terminalSem, 1);
         iters++;
         continue;
@@ -662,7 +706,7 @@ export async function nnSearchBest(bd, side, opt = {}) {
       const cached = lookupEval(key);
       if (cached) {
         cacheHits++;
-        const sem = semOf(cached);
+        const sem = semOf(cached, e.node.side);
         virtualApply(e.path);
         expand(e.node, cached.policy, cached.policyPass, bd, genLegal(bd, e.node.side));
         e.node.nn = sem;
@@ -698,8 +742,20 @@ export async function nnSearchBest(bd, side, opt = {}) {
   const tEff = effectiveTemperature(temperature, temperatureHalflife, rootRecent.length);
   const move = chooseFinalMove(root, tEff);
   const best = pickBest(root);
-  const bestQ = best && best.node.weight > 0 ? best.node.util / best.node.weight : 0;
-  const winRate = (bestQ + 1) / 2;
+  /* 根加权胜率:全部子按边分摊权重的效用均值 —— 比旧口径(最佳子 q)
+   * 少一层选点乐观偏差,认输判据与 UI 胜率据此不再系统性虚高
+   * (2026-10-05 诊断:落后 35 目时旧口径仍报 ~50%) */
+  let wSum = 0, uSum = 0;
+  for (const ch of root.children ?? []) {
+    const n = ch.node;
+    if (n && n.weight > 0 && n.visits > 0) {
+      const w = n.weight * (ch.edgeVisits / n.visits);
+      wSum += w; uSum += w * (n.util / n.weight);
+    }
+  }
+  const rootQ = wSum > 0 ? uSum / wSum
+    : (best && best.node.weight > 0 ? best.node.util / best.node.weight : 0);
+  const winRate = (rootQ + 1) / 2;
 
   /* ---- GC:从根标记可达,清扫节点表(KataGo mark-and-sweep) ---- */
   if (opt.reuseTree !== false) {

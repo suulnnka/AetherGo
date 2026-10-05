@@ -21,7 +21,7 @@
  * ============================================================ */
 import {
   newBoard, replayMoves, make, capturedOf, koPoint, genLegal, boardToArray,
-  finalScore, scoreBreakdown, deadStonesWithOwnership, PASS, BLACK, KOMI,
+  finalScore, scoreBreakdown, deadStonesWithOwnership, PASS, BLACK, WHITE, KOMI,
 } from './engine.js';
 import { nnSearchBest } from './nn/search.js';
 import { createSession } from './nn/session.js';
@@ -172,12 +172,14 @@ self.onmessage = async (e) => {
     return;
   }
 
-  /* think */
+  /* think:try/catch 必须有 —— handler 是 async,一旦异常逃逸就是 worker 内
+   * 未处理拒绝,不会传到页面 worker.onerror,UI 将永远停在「思考中」 */
   if (!session) {
     self.postMessage({ id: d.id, error: 'nn-engine-not-loaded' });
     return;
   }
   const t0 = Date.now();
+  try {
   const bd = newBoard();
   const side = replayMoves(bd, d.moves);
   if (side < 0) { self.postMessage({ id: d.id, error: 'illegal-sequence' }); return; }
@@ -215,4 +217,11 @@ self.onmessage = async (e) => {
     id: d.id, move: r.move, visits: r.visits, nodes: r.visits,
     ms: Date.now() - t0, winRate: r.winRate, scoreLead: r.scoreLead, only: !!r.only,
   });
+  } catch (err) {
+    self.postMessage({ id: d.id, error: `think-failed: ${err && (err.stack || err.message) || err}` });
+  }
 };
+
+/* 测试钩子(worker-smoke-test 用,同 search.js __nodeTableSize 风格):
+ * 直注会话绕过 WebGPU/CDN,驱动完整 think 消息流(含认输判定等搜索后路径) */
+export function __setSessionForTest(s) { session = s; }

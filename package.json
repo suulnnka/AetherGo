@@ -9,7 +9,7 @@
     "./engine": "./src/engine.js"
   },
   "scripts": {
-    "test": "node test/engine-test.mjs && node test/features-test.mjs && node test/katago-align-test.mjs",
+    "test": "node test/engine-test.mjs && node test/features-test.mjs && node test/katago-align-test.mjs && node test/worker-smoke-test.mjs",
     "test:featdiff": "node test/featdiff.mjs /tmp/featdiff.json && node test/featdiff.mjs /tmp/featdiff20.json",
     "test:nn-e2e": "node test/nn-e2e.mjs",
     "match": "node test/nn-match.mjs"

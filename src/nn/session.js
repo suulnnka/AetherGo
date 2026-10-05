@@ -49,8 +49,10 @@ let ortP = null;
 async function loadOrt() {
   if (ortP) return ortP;
   ortP = (async () => {
-    /* Worker(module)与主线程都能用动态 import;CDN 的 ort.min.js 是 ESM 兼容包 */
-    const ort = await import(/* @vite-ignore */ `${ORT_CDN}/ort.all.min.js`);
+    /* Worker(module)与主线程都能用动态 import;必须取 .mjs —— dist/ort.all.min.js
+     * 是 UMD/CJS(浏览器 import() 下命名空间为空,ort.env 为 undefined),
+     * 只有 .mjs 有具名导出 env/Tensor/InferenceSession */
+    const ort = await import(/* @vite-ignore */ `${ORT_CDN}/ort.all.min.mjs`);
     ort.env.wasm.wasmPaths = `${ORT_CDN}/`;
     return ort;
   })();

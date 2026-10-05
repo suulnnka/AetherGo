@@ -196,7 +196,9 @@ const search = (bd, opts) => nnSearchBest(bd, BLACK, {
       if (n === 2 && !ownA && !ownB) oppBothStars++;
       const policy = new Float32Array(N2).fill(-20);
       policy[pair[0]] = 6; policy[pair[1]] = 6;
-      return { policy, policyPass: -20, winLoss: 0.3 };
+      /* winLoss=0:值中性,路径分布由先验驱动 —— 视角修复(2026-10-05)后
+       * 恒 0.3 的桩使黑叶效用反号、搜索改道,转置状态不再被探到 */
+      return { policy, policyPass: -20, winLoss: 0.0 };
     });
   } };
   const bdB = newBoard();
