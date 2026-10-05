@@ -1,6 +1,12 @@
 /* ============================================================
  * AetherGo NN 版异步 PUCT 搜索 —— v4:图搜索(useGraphSearch,最终选点/效用同 v3)
  *
+ * == v4.4(2026-10-06):subtreeValueBias 移植(setup GTP 默认 0.45)==
+ *   - 同「行棋方+上二手+落点 5×5 局部形(8 对称规范化)+劫」签名的节点共享
+ *     在线表项,重算时累计(子树均值−自身评估)·origTotal^0.85,自身评估
+ *     效用往表项均值偏移 0.45 份;叶首评/死端同偏,终局值不偏;GC 删除
+ *     节点回退 80% 贡献。校正网络评估的局部系统性偏差,锚定更实。
+ *
  * == v4.3(2026-10-06):搜索随机对称(nnEvaluator 同款)==
  *   - 每次评估随机取 8 对称之一:spatial 点映射通道整体置换(等价变换局面
  *     后编码),policy/ownership 逆置换回恒等系;值输出与 global 不变量。
@@ -87,6 +93,7 @@ export function clearEvalCache() {
   clearEvalCacheImpl();
   nodeTable = new Map();
   treeKeep = null;
+  biasTable = new Map();               // subtreeValueBias 表同随测试隔离清空
 }
 
 /* ==================== GTP 实战配方常数(setup.cpp SETUP_FOR_GTP) ==================== */
@@ -152,6 +159,58 @@ function unpermuteOut(out, perm) {
     return o;
   })() : out.ownership;
   return { ...out, policy, ownership };
+}
+
+/* ==================== subtreeValueBias(searchupdatehelpers.cpp:287 / subtreevaluebiastable.cpp,setup GTP 默认 0.45) ====================
+ * 跨节点在线校正自身评估锚:同「行棋方 + 上二手 + 落点 5×5 局部形(8 对称
+ * 规范化,行棋方相对色)+ 劫」签名的节点共享一个表项,重算时累计
+ * (子树均值 − 自身评估)·origTotal^0.85,并把自身评估效用往表项均值方向
+ * 偏移 factor 份;叶首评/死端再计同样偏移;终局值不偏移。GC 删除节点时按
+ * freeProp 回退 80% 贡献(20% 沉淀为历史证据)。表 Worker 生命期内跨手
+ * 持久(KataGo Search 对象同生命周期)。 */
+const SUBTREE_BIAS_F = 0.45;               // subtreeValueBiasFactor
+const SUBTREE_BIAS_WEXP = 0.85;            // subtreeValueBiasWeightExponent
+const SUBTREE_BIAS_FREEPROP = 0.8;         // subtreeValueBiasFreeProp
+let biasTable = new Map();                 // key → { d, w }
+const BIAS_WIN_PERMS = (() => {
+  const perms = [];
+  for (let s = 0; s < 8; s++) {
+    const idx = new Int32Array(25);
+    for (let i = 0; i < 5; i++) for (let j = 0; j < 5; j++) {
+      let r = i, c = j;
+      for (let k = 0; k < (s & 3); k++) { const t = r; r = c; c = 4 - t; }
+      if (s & 4) c = 4 - c;
+      idx[i * 5 + j] = r * 5 + c;
+    }
+    perms.push(idx);
+  }
+  return perms;
+})();
+/* 签名键:bd 须为落子前盘面(search.cpp:977 getRecentBoard(1) 语义,
+ * 窗口中心 = 落点,中心格为空);prevMove = 再上一手(父节点自己的着法)。 */
+function biasKeyOf(bd, mover, prevMove, mv, ko) {
+  if (mv === PASS || prevMove === PASS || prevMove < 0) return null;
+  const r0 = (mv / N) | 0, c0 = mv % N;
+  const own = mover + 1;
+  const cells = new Array(25);
+  for (let i = 0; i < 5; i++) for (let j = 0; j < 5; j++) {
+    const r = r0 + i - 2, c = c0 + j - 2;
+    if (r < 0 || r >= N || c < 0 || c >= N) { cells[i * 5 + j] = 3; continue; }
+    const s = bd[r * N + c];
+    cells[i * 5 + j] = s === EMPTY ? 0 : (s === own ? 1 : 2);
+  }
+  let best = null;
+  for (const perm of BIAS_WIN_PERMS) {
+    let k = "";
+    for (let t = 0; t < 25; t++) k += String.fromCharCode(48 + cells[perm[t]]);
+    if (best === null || k < best) best = k;
+  }
+  return mover + "|" + prevMove + "|" + mv + "|" + best + "|" + ko;
+}
+function biasOf(node) {
+  if (node.biasKey == null) return 0;
+  const e = biasTable.get(node.biasKey);
+  return e && e.w > 0.001 ? SUBTREE_BIAS_F * e.d / e.w : 0;
 }
 
 /* ==================== ScoreValue JS 版(nninputs.cpp 权威) ==================== */
@@ -320,6 +379,9 @@ function computeTrailing(moves) {
 
 /** 测试钩子:当前节点表规模 */
 export const __nodeTableSize = () => nodeTable.size;
+/** 测试钩子:仅清 subtreeValueBias 表(隔离「二次搜索可复现」类断言 ——
+ * bias 跨搜索学习是 KataGo 忠实语义,表随引擎生命期持久) */
+export function __clearBiasTable() { biasTable = new Map(); }
 
 /* ==================== t 分布(ν=3)CDF 闭式 ==================== */
 function t3cdf(x) {
@@ -361,6 +423,7 @@ export async function nnSearchBest(bd, side, opt = {}) {
     scoreMean: 0, scoreMeanSq: 0,
     nn: null, terminal: false, terminalSem: null,
     chainKey, evalPending: false, vl: 0, _gc: 0,
+    biasKey: null, lastBD: 0, lastBW: 0,
   });
 
   /* ---- 语义值管道(同 v3) ----
@@ -443,9 +506,10 @@ export async function nnSearchBest(bd, side, opt = {}) {
    * wAdj 先经 pruneNoiseWeight(先验序)再 valueWeight t3 降权归一。 */
   function initLeafStats(node, sem) {
     /* 叶首评:自身评估一份(searchnnhelpers.cpp:171 addCurrentNNOutputAsLeafValue
-     * assumeNoExistingWeight=true,REPLACE 语义) */
+     * assumeNoExistingWeight=true,REPLACE 语义)+ subtreeValueBias 偏移
+     * (addLeafValue 同款,非终局才偏) */
     const uw = uncertaintyWeight(sem);
-    const uW = utilityWhite(sem);
+    const uW = utilityWhite(sem) + biasOf(node);
     const flip = (node.side ^ 1) === WHITE ? 1 : -1;
     node.visits = 1;
     node.weight = uw; node.weightSq = uw * uw;
@@ -457,11 +521,11 @@ export async function nnSearchBest(bd, side, opt = {}) {
   }
   function accumulateSelfEval(node) {
     /* 死端:自身评估再计一份(search.cpp:1408 addCurrentNNOutputAsLeafValue
-     * accumulate 语义 —— 全子被禁时节点困住计访) */
+     * accumulate 语义 —— 全子被禁时节点困住计访),同样带 bias 偏移 */
     const sem = node.nn;
     if (!sem) return;
     const uw = uncertaintyWeight(sem);
-    const uW = utilityWhite(sem);
+    const uW = utilityWhite(sem) + biasOf(node);
     const flip = (node.side ^ 1) === WHITE ? 1 : -1;
     node.visits++;
     node.weight += uw; node.weightSq += uw * uw;
@@ -495,6 +559,7 @@ export async function nnSearchBest(bd, side, opt = {}) {
       currentTotal += wAdj;
       thisVisits += ch.edgeVisits;
     }
+    const origTotal = currentTotal;                       // bias 权重用降权前总量(KataGo origTotalChildWeight)
     if (!good.length) {
       /* 无 good 子:统计回落为自身评估一份(KataGo 空子和循环同款) */
       initLeafStats(n, n.nn);
@@ -548,7 +613,9 @@ export async function nnSearchBest(bd, side, opt = {}) {
         for (const g of good) g.wAdj *= f;
       }
     }
-    /* 加权求和(子均值,白视角)+ 自身评估一份(searchupdatehelpers.cpp:269) */
+    /* 加权求和(子均值,白视角)+ 自身评估一份(searchupdatehelpers.cpp:269);
+     * 自身评估先过 subtreeValueBias:表项累计 (子树均值−评估)·origTotal^0.85,
+     * 再把评估往表项均值偏移 factor 份(searchupdatehelpers.cpp:287 同款) */
     let uSum = 0, wlSum = 0, mSum = 0, mSqSum = 0, uSqSum = 0, wSqSum = 0;
     for (const g of good) {
       const c = g.c, scaling = g.wAdj / c.weight;
@@ -562,7 +629,20 @@ export async function nnSearchBest(bd, side, opt = {}) {
     {
       const sem = n.nn;
       const uw = uncertaintyWeight(sem);
-      const uW = utilityWhite(sem);
+      let uW = utilityWhite(sem);
+      if (n.biasKey != null) {
+        let entry = biasTable.get(n.biasKey);
+        if (!entry) { entry = { d: 0, w: 0 }; biasTable.set(n.biasKey, entry); }
+        if (currentTotal > 1e-10) {
+          const uChildren = uSum / currentTotal;
+          const bw = Math.pow(origTotal, SUBTREE_BIAS_WEXP);
+          const delta = (uChildren - uW) * bw;
+          entry.d += delta - n.lastBD;
+          entry.w += bw - n.lastBW;
+          n.lastBD = delta; n.lastBW = bw;
+        }
+        if (entry.w > 0.001) uW += SUBTREE_BIAS_F * entry.d / entry.w;
+      }
       uSum += uW * uw; wlSum += sem.wlW * uw;
       if (sem.hasScore) { mSum += sem.mW * uw; mSqSum += sem.mW * sem.mW * uw; }
       uSqSum += uW * uW * uw;
@@ -715,6 +795,8 @@ export async function nnSearchBest(bd, side, opt = {}) {
       const isFreshEdge = best.node === null;
       let node;
       if (isFreshEdge) {
+        /* bias 签名须用落子前盘面(search.cpp:977 getRecentBoard(1) 语义) */
+        const biasK = biasKeyOf(bd, cur.side, cur.move, best.move, koPoint());
         const tok = make(bd, best.move, cur.side);            // 活状态 → 子位置
         const trailing = computeTrailing(recent.concat(best.move));
         const { key } = childChainKey(cur, best.move, bd, cur.side ^ 1, trailing);
@@ -726,6 +808,7 @@ export async function nnSearchBest(bd, side, opt = {}) {
         }
         if (!node) {
           node = makeNode(best.move, cur.side ^ 1, key);
+          node.biasKey = biasK;
           /* 双停终局:建表时判(活盘面即终局盘面;节点按位置身份,转置命中同键必然同终局) */
           if (cur.move === PASS && best.move === PASS) {
             node.terminal = true;
@@ -986,7 +1069,15 @@ export async function nnSearchBest(bd, side, opt = {}) {
         if (ch.node && ch.node._gc !== gcEpoch) { ch.node._gc = gcEpoch; stack.push(ch.node); }
       }
     }
-    for (const [k, n] of table) if (n._gc !== gcEpoch) table.delete(k);
+    for (const [k, n] of table) if (n._gc !== gcEpoch) {
+      /* subtreeValueBias:删除节点回退 80% 贡献(removeSubtreeValueBias,
+       * freeProp 语义:20% 沉淀为历史证据) */
+      if (n.biasKey != null && (n.lastBD !== 0 || n.lastBW !== 0)) {
+        const e = biasTable.get(n.biasKey);
+        if (e) { e.d -= n.lastBD * SUBTREE_BIAS_FREEPROP; e.w -= n.lastBW * SUBTREE_BIAS_FREEPROP; }
+      }
+      table.delete(k);
+    }
     if (table !== nodeTable) { /* 局部表(reuseTree=false):随搜索结束丢弃 */ }
   }
 
