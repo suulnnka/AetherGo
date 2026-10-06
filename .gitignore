@@ -34,9 +34,8 @@ Thumbs.db
 # --- 说明 ---
 # models/*.onnx 不忽略:模型是发布资产(在线对弈页按相对路径加载),
 # 按「仅支持一种模型」的产品边界,models/ 内始终只保留当前在役的那一个。
-# .aewn 发布两个:.i8.aewn(默认, int8 权重 + f16 激活)与 .f16.aewn(回退,
-# f16 权重)—— 计算本就是 f16,f32 权重存储无发布意义,不入库(测试用
-# test/blob-helper.mjs 现场生成)。
-models/b8c96h3tfrs_19.aewn
+# .aewn 三份全部入库(2026-10-07 拍板:f32/i8/f16 不允许删):
+#   .i8.aewn 默认(int8 权重 + f16 激活)/ .f16.aewn 回退(f16 权重)/
+#   .aewn fp32 golden(cpuref 对拍基准;packer 可从 onnx 逐字节再生)。
 # 本机差分手册,含机器路径等私有信息,不入库(本地保留)
 docs/DIFF_WORKFLOW.md

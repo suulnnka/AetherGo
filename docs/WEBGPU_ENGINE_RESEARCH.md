@@ -322,6 +322,9 @@ Dawn node 绑定 `npm i --no-save webgpu`)→ `test/aewnn-stage-diff.mjs` / `aew
   gemmRes 绑定序曾与 session 不一致(res/out 换位 → proj 全零);③头部曾
   误路由到 f16 权重内核(blob 里头部是 f32)→ ±Inf/NaN。三者均由
   「逐 dispatch 分段快照 + WGSL vs cpuref 双层隔离」定位。
+- **产物入库(2026-10-07 拍板)**:f32 golden(.aewn, 3.82MB)/ i8 默认(1.14MB)/
+  f16 回退(2.01MB)三份全部入库,不允许删;f32 由 packer 从 onnx 确定性再生
+  (已验证逐字节一致)。
 - **默认**:对弈页缺省加载量化版;`?weights=f32` 强制 fp32 golden 版;
   适配器无 shader-f16 自动回落 f16 权重版。L3 对弈级(300 局等 visits)为遗留验收。
 

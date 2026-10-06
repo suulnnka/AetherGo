@@ -1,9 +1,8 @@
 /* 测试辅助:确保 .aewn blob 在场(缺失时调 packer 现做)。
  *
- * 仓库只入库两个发布产物:.i8.aewn(默认)与 .f16.aewn(回退)。
- * f32 blob(3.82MB)只是测试/golden 夹具,不入库,按需本地生成 ——
- * 计算本就是 f16,f32 权重存储没有发布意义(INT8 报告三步走的结论)。
- */
+ * 三份 blob 全部入库(2026-10-07 拍板:f32/i8/f16 不允许删):
+ *   .i8.aewn 默认 / .f16.aewn 回退 / .aewn fp32 golden。
+ * helper 只兜底「本地缺文件」的场景(如新克隆后未跑 packer)。*/
 import { existsSync, readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
