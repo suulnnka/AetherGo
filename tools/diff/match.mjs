@@ -64,7 +64,12 @@ const evalBatch = async (rows) => {
     setTimeout(() => rej(new Error("inf-timeout")), 120000);
   });
 };
-const session = { maxBatch: 16, evalBatch };
+/* 我方推理批次:默认 1 = 与 KataGo 单线程同语义(顺序搜索,无 stale 统计),
+ * 固定 visits 下最强口径 —— 2026-10-06 实测同代码批 1 vs 批 4 自对弈 10-2,
+ * 批 16(预算钳到 4)打 KataGo 1-5,批 1 打 KataGo 3-3(64 visits × 6)。
+ * 批 >1 是「吞吐换访问质量」的产品选项(浏览器延迟优先),测强度勿用;
+ * MBATCH 环境变量可覆盖。 */
+const session = { maxBatch: Number(process.env.MBATCH ?? 1), evalBatch };
 
 /* ---------- 对局 ---------- */
 await kataCmd("boardsize 19"); await kataCmd("komi 7.5");
