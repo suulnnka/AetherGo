@@ -786,10 +786,17 @@ export async function nnSearchBest(bd, side, opt = {}) {
           q = (n.visits > 0 && n.weight > 0) ? n.util / n.weight : fpu;
           /* 边访问缩放:该边分摊的权重(getChildWeight 口径) */
           cw = n.weight * (ch.edgeVisits / Math.max(n.visits, 1));
-          /* 虚拟损失:效用向 ±utilityRadius 混合 + 分母膨胀
-           * (getExploreSelectionValueOfChild,searchexplorehelpers.cpp:141) */
+          /* 虚拟损失:效用向「对行棋方最坏」的 −utilityRadius 混合 + 分母膨胀
+           * (getExploreSelectionValueOfChild,searchexplorehelpers.cpp:141:
+           * KataGo 在白视角空间取 pla==WHITE?−R:+R,即对任何行棋方都是坏向;
+           * 本引擎 q 为行棋方视角,坏向恒为 −R,与颜色无关。
+           * ★ 2026-10-06 修复:旧版误写 (side===WHITE)?−R:+R —— 黑方行棋
+           * 节点 vl 把子拉向好方向,批内同伴挤向同子 → evalPending 死端 →
+           * 半批发射 + accumulateSelfEval 统计污染;批 1 时 vl 恒 0,bug 不可
+           * 见。这是批 4 游戏级放血(T4 vs T1 自对弈 1-11、vs KataGo 3-33,
+           * 而单局面分布对拍正常)的根因) */
           if (n.vl > 0) {
-            const vlU = (cur.side === WHITE) ? -UTILITY_RADIUS : UTILITY_RADIUS;
+            const vlU = -UTILITY_RADIUS;
             const frac = n.vl / (n.vl + Math.max(0.25, cw));
             q = q + (vlU - q) * frac;
             cw += n.vl;
