@@ -227,8 +227,52 @@ function valueMlp(gp, Wv2, v2b, Wvh, vhb, Wm, mb, n, valOut, miscOut) {
  * 创建 CPU 参考会话:同 evalBatch 契约(rows 可带 sym; optimism 同 ort 路径)。
  */
 export function createCpuRefSession(blobBuffer, opt = {}) {
-  const { meta, w: weights } = parseAewn(blobBuffer);
+  const parsed = parseAewn(blobBuffer);
+  const { meta, w: weights } = parsed;
   assertPlanMeta(meta);
+  /* 压缩 blob 反量化仿真(dtype=1 int8×scale;dtype=2 f16 精确解码),还原成 f32
+   * 权重再跑同一套 f32 数学 —— 得到「纯权重精度效应」的参照(WGSL 的 f16 激活
+   * 舍入另计,由 WGSL vs cpuref 层隔离)。 */
+  if (parsed.dtype === 1) {
+    for (const [name, sName] of Object.entries(meta.quant ?? {})) {
+      const packed = weights.get(name);
+      const scale = weights.get(sName);
+      const dims = parsed.dims.get(name);
+      const total = packed.length * 4;
+      const out = new Float32Array(total);
+      const firstAxis = meta.quantAxis?.[name] === 'first';
+      const O = firstAxis ? dims[0] : dims[dims.length - 1];
+      const inner = total / O;
+      for (let i = 0; i < total; i++) {
+        const b = (packed[i >> 2] >>> ((i & 3) * 8)) & 0xFF;
+        const sv = b >= 128 ? b - 256 : b;
+        out[i] = sv * scale[firstAxis ? (i / inner) | 0 : i % O];
+      }
+      weights.set(name, out);
+    }
+  } else if (parsed.dtype === 2) {
+    for (const name of Object.keys(meta.quant ?? {})) {
+      const bits = weights.get(name);
+      const out = new Float32Array(bits.length);
+      for (let i = 0; i < bits.length; i++) {
+        const h = bits[i];
+        const sg = (h & 0x8000) >> 15, e = (h & 0x7c00) >> 10, m = h & 0x03ff;
+        out[i] = e === 0 ? (sg ? -1 : 1) * m * 2 ** -24
+          : e === 31 ? (m ? NaN : (sg ? -Infinity : Infinity))
+            : (sg ? -1 : 1) * (1 + m / 1024) * 2 ** (e - 15);
+      }
+      weights.set(name, out);
+    }
+  }
+  /* 激活范围扫描(opt.scanActivations):逐 stage 记录 absmax,验证 f16 存储安全
+   * (上限 65504;INT8 报告 §5.3-2 的范围覆盖检查同款口径)。 */
+  const actRange = opt.scanActivations ? {} : null;
+  const scan = (name, arr) => {
+    if (!actRange) return;
+    let m = 0;
+    for (let i = 0; i < arr.length; i++) { const v = Math.abs(arr[i]); if (v > m) m = v; }
+    actRange[name] = Math.max(actRange[name] ?? 0, m);
+  };
   const w = { get: (k) => { const v = weights.get(k); if (!v) throw new Error(`blob 缺张量 ${k}`); return v; }, stemTables: makeStemTables() };
   const cosT = w.get('rope.cos'), sinT = w.get('rope.sin');
   const EPS = meta.eps ?? RMS_EPS;
@@ -276,17 +320,21 @@ export function createCpuRefSession(blobBuffer, opt = {}) {
       const sym = r.sym ?? 0;
       stemConv(w, i, sym, spatialBat, globalBat, trunk);
       if (i === 0) snap('stem', trunk);
+      scan('stem', trunk);
 
       /* PyTorch TransformerAttentionBlock ×8(前半)与 TransformerFFNBlock ×8(后半) */
       for (let b = 0; b < NUM_BLOCKS; b++) {
         rmsNorm(trunk, w.get(`attn${b}.norm`), i, normed);
         if (i === 0 && b === 0) snap('norm0', normed);
+        scan('norm', normed);
         qkvGemm(normed, w.get(`attn${b}.qkv`), i, qkv);
         if (i === 0 && b === 0) snap('q0', qkv.subarray(0, HW * C_TRUNK));
+        scan('qkv', qkv);
         ropeScatter(qkv, cosT, sinT, i, qh, kh, vh);
         if (i === 0 && b === 0) snap('qrope0', qh);
         attention(qh, kh, vh, i, scores, attn);
         if (i === 0 && b === 0) { snap('scores0', scores); snap('attn0', attn); }
+        scan('attn', attn);
         gemm(attn, w.get(`attn${b}.out`), i, C_TRUNK, C_TRUNK, proj, 'res', trunk);
         [trunk, proj] = [proj, trunk];
         snap(`resA${b}`, trunk);
@@ -295,8 +343,10 @@ export function createCpuRefSession(blobBuffer, opt = {}) {
         rmsNorm(trunk, w.get(`ffn${b}.norm`), i, normed);
         gemm(normed, w.get(`ffn${b}.gate`), i, C_TRUNK, FFN_FUSED, gate, 'plain');
         if (i === 0 && b === 0) snap('gate0', gate);
+        scan('gate', gate);
         swiglu(gate, i, hidden);
         if (i === 0 && b === 0) snap('hidden0', hidden);
+        scan('hidden', hidden);
         gemm(hidden, w.get(`ffn${b}.ffn2`), i, FFN, C_TRUNK, proj, 'res', trunk);
         [trunk, proj] = [proj, trunk];
         snap(`resB${b}`, trunk);
@@ -305,6 +355,7 @@ export function createCpuRefSession(blobBuffer, opt = {}) {
 
       trunkFinal(trunk, w.get('trunkfinal.scale'), w.get('trunkfinal.bias'), i);
       if (i === 0) snap('trunkfinal', trunk);
+      scan('trunkfinal', trunk);
 
       /* PolicyHead:conv1p(无偏) ‖ conv1g(折 scale)+biasg→relu → 池化 →
        * linear_g+gpbias+bias2→relu → conv2p;pass 路独立 MLP */
@@ -360,7 +411,7 @@ export function createCpuRefSession(blobBuffer, opt = {}) {
     return res;
   }
 
-  return { ep: 'cpuref', evalBatch, meta, get __debug() { return out0; } };
+  return { ep: 'cpuref', evalBatch, meta, get __debug() { return out0; }, get __actRange() { return actRange; } };
 }
 
 export { N2 };

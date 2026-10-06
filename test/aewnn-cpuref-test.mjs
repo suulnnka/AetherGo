@@ -90,9 +90,8 @@ function positions() {
 }
 
 /* ---------- 主流程 ---------- */
-const blob = readFileSync(join(ROOT, 'models/b8c96h3tfrs_19.aewn'));
-const bufCopy = blob.buffer.slice(blob.byteOffset, blob.byteOffset + blob.byteLength);
-const session = createCpuRefSession(bufCopy);
+const { ensureBlob } = await import(join(ROOT, 'test/blob-helper.mjs'));
+const session = createCpuRefSession(ensureBlob('b8c96h3tfrs_19.aewn', ['f32']));
 
 const CASES = [];
 for (const { bd, side, moves } of positions()) {

@@ -25,6 +25,8 @@
  *   ★ 8 对称:rows[i].sym(可省,缺省 0)随行下发 —— aewnn 在 GPU 侧置换
  *     (stem gather);ort 路径在本文件内做 CPU 置换(成本同旧 search 侧)。
  * - 批大小校准:src/nn/calibrate.js,两路共用同一测速器与 maxBatch 语义。
+ * - 权重精度:aewnn 缺省加载 int8 量化版(models/b8c96h3tfrs_19.i8.aewn,
+ *   W8A16 + f16 激活存储,INT8 报告 §4.1 方案 A);?weights=f32 切 fp32 版。
  * ============================================================ */
 import { N, N2 } from '../engine.js';
 import { SYM8, permuteSpatial } from './symmetry.js';
@@ -88,7 +90,13 @@ export async function createSession(opt) {
   if (engine !== 'ort') {
     if (engine !== 'aewnn') throw new Error(`未知引擎: ${engine}`);
     const { createAewnnSession } = await import('./webgpu/session.js');
-    return createAewnnSession(opt);
+    /* 权重精度:缺省 int8 量化版(.i8.aewn,W8A16 + f16 激活);
+     * opt.weightsF32 或 ?weights=f32 强制 fp32 版(.aewn)。 */
+    let w32 = opt.weightsF32;
+    if (w32 === undefined && typeof location !== 'undefined') {
+      w32 = new URLSearchParams(location.search).get('weights') === 'f32';
+    }
+    return createAewnnSession({ ...opt, weightsF32: !!w32 });
   }
   return createOrtSession(opt);
 }

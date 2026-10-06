@@ -15,7 +15,8 @@
     "match": "node test/nn-match.mjs",
     "test:aewnn": "node test/aewnn-wgsl-test.mjs && node test/aewnn-cpuref-test.mjs",
     "bench:aewnn": "node test/aewnn-bench.mjs",
-    "diff:aewnn": "node test/aewnn-stage-diff.mjs && node test/aewnn-gpu-probe.mjs"
+    "diff:aewnn": "node test/aewnn-stage-diff.mjs && node test/aewnn-gpu-probe.mjs",
+    "test:quant": "node test/aewnn-quant-test.mjs"
   },
   "license": "MIT",
   "repository": {

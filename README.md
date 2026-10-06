@@ -19,6 +19,18 @@ flash attention、BiasMask 折叠、RoPE 打包期预算),权重经 `training/pa
 搜索侧特征零拷贝直传。对拍全绿(vs ort CPU:policy 1.4e-5;WGSL vs CPU 参考:2.7e-5),
 nn-e2e 完整终局。真机性能 A/B 后再删 ort 逃生舱(`?engine=ort`)。
 
+2026-10-06(晚):**默认权重切 int8 量化版**(`models/b8c96h3tfrs_19.i8.aewn`,1.14MB,
+f32 的 30%)—— 完全按量化研究(quant_explore,第 40 批权重)执行:全部 58 层 trunk
+权重逐输出通道对称 int8(研究的逐层裁剪搜索证明 minmax 即最优,无敏感离群值),
+计算 f16 激活存储/f32 累加(W8A16,激活不做 a8);头部/norm/RoPE 按 PyTorch fp32
+头部口径留 f32。引擎侧 30 例对拍与研究 8192 盘面 int8w 行同带(KL 9.7e-4 /
+winMAE 6.2e-3 / top1 含近平局 100%,0 实质翻转),「W8A16 基本无损」在引擎侧复现。
+回退产物为 **f16 权重版**(`models/b8c96h3tfrs_19.f16.aewn`,2.01MB,fp16 纯变体
+Top1 99.62% ≈ 无损)—— 计算本就是 f16,f32 权重存储无发布意义,不再入库。
+`?weights=f32` 留 golden 通道;无 shader-f16 自动回落 f16 版。遗留:L3 对弈级验收
+(300 局等 visits)。另修复:packer 曾把 stem.global_w([OC][19])按列轴量化,
+GPU 按通道读 → 引擎侧 0.3~4 logit 偏差,已改首维轴并重打包。
+
 **在线体验:** 打开 <https://suulnnka.github.io/AetherWebOS/> 启动「围棋」应用 —— 那里面跑的就是本引擎
 (默认高级档,窗口信息行实时显示演棋局数 / 胜率 / 耗时)。
 

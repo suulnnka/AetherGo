@@ -21,8 +21,8 @@ const { encodeFeatures } = await import(join(ROOT, 'src/nn/features.js'));
 const { createCpuRefSession } = await import(join(ROOT, 'src/nn/webgpu/cpuref.js'));
 const { createAewnnSession } = await import(join(ROOT, 'src/nn/webgpu/session.js'));
 
-const blobBuf = readFileSync(join(ROOT, 'models/b8c96h3tfrs_19.aewn'));
-const blob = blobBuf.buffer.slice(blobBuf.byteOffset, blobBuf.byteOffset + blobBuf.byteLength);
+import { ensureBlob } from './blob-helper.mjs';
+const blob = ensureBlob('b8c96h3tfrs_19.aewn', ['f32']);
 
 const SEQ = [[3,3],[15,15],[3,15],[15,3],[9,9],[3,9],[15,9],[9,3],[9,15],[5,5],[13,13],[5,13],[13,5],[7,7],[11,11],[7,11],[11,7],[2,8],[16,8],[8,2],[8,16]];
 const bd = newBoard();

@@ -20,7 +20,7 @@ import {
   NUM_BLOCKS, SPATIAL_C, GLOBAL_C, HEAD_C, ATTN_SCALE, RMS_EPS,
   parseAewn, assertPlanMeta, makeStemTables,
 } from './plan.js';
-import KERNELS from './kernels.js';
+import { buildKernels } from './kernels.js';
 import { calibrateMaxBatch } from '../calibrate.js';
 
 const CAP = 32;                       // 缓冲容量(= 校准最大档;搜索 maxBatch ≤ CAP)
@@ -48,7 +48,10 @@ export async function createAewnnSession(opt) {
   if (adapter.limits.maxStorageBuffersPerShaderStage > 8) {
     reqLimits.maxStorageBuffersPerShaderStage = Math.min(9, adapter.limits.maxStorageBuffersPerShaderStage);
   }
-  const device = await adapter.requestDevice({ requiredLimits: reqLimits });
+  /* 量化版(i8f16)的 f16 激活存储需要 shader-f16;适配器不支持则回落 f32 blob。 */
+  const f16ok = adapter.features.has('shader-f16');
+  const requiredFeatures = f16ok ? ['shader-f16'] : [];
+  const device = await adapter.requestDevice({ requiredLimits: reqLimits, requiredFeatures });
   device.addEventListener?.('uncapturederror', (e) => {
     console.error('[aewnn] GPU 错误:', e.error?.message || e.error);
   });
@@ -57,13 +60,32 @@ export async function createAewnnSession(opt) {
   let blob;
   if (opt.blob) {
     blob = opt.blob;                               // 测试直载(Node fetch 不支持 file://)
+    if (opt.blobDtype !== undefined && opt.blobDtype !== 0 && !f16ok) {
+      throw new Error('量化 blob(i8f16)需要 adapter 支持 shader-f16,当前设备不支持');
+    }
   } else {
-    const url = opt.aewnUrl ?? opt.modelUrl.replace(/\.onnx$/, '.aewn');
-    const resp = await fetch(url);
-    if (!resp.ok) throw new Error(`权重 blob 加载失败(HTTP ${resp.status}): ${url}`);
+    const base = opt.aewnUrl ?? opt.modelUrl.replace(/\.onnx([?#].*)?$/, '');
+    /* 缺省链:量化版(.i8.aewn)→ f16 权重版(.f16.aewn;计算本就是 f16,f32 blob 无意义)。
+     * ?weights=f32 才找 fp32 版(golden/测试用),找不到自动落 f16 版。 */
+    const wantQ = !opt.__noQuant && !opt.weightsF32 && f16ok;
+    const urls = opt.aewnUrl ? [opt.aewnUrl]
+      : wantQ ? [`${base}.i8.aewn`, `${base}.f16.aewn`]
+        : opt.weightsF32 ? [`${base}.aewn`, `${base}.f16.aewn`]
+          : [`${base}.f16.aewn`];
+    let resp = null, url = '';
+    for (const u of urls) {
+      resp = await fetch(u);
+      if (resp.ok) { url = u; break; }
+    }
+    if (!resp || !resp.ok) throw new Error(`权重 blob 加载失败(HTTP ${resp?.status}): ${urls.join(', ')}`);
     blob = await resp.arrayBuffer();
+    status(url.endsWith('.i8.aewn') ? '权重:int8 量化版(W8A16 + f16 激活)'
+      : url.endsWith('.f16.aewn') ? '权重:f16 权重版' : '权重:fp32 版');
   }
-  const { meta, w: weights } = parseAewn(blob);
+  const parsed = parseAewn(blob);
+  const { meta, w: weights } = parsed;
+  const Q = parsed.dtype !== 0;                       // 压缩模式(i8f16 / f16)共用 f16 激活
+  const MODE = parsed.dtype === 1 ? 'q' : parsed.dtype === 2 ? 'f16w' : 'f32';
   assertPlanMeta(meta);
   const wOf = (k) => {
     const v = weights.get(k);
@@ -71,7 +93,10 @@ export async function createAewnnSession(opt) {
     return v;
   };
 
-  /* ==================== GPUBuffer 规划 ==================== */
+  /* ==================== GPUBuffer 规划 ====================
+   * Q(i8f16)模式:激活中间量 f16 存储(2B/元);输入/池化向量 gp/输出缓冲
+   * 保持 f32(输入是契约,输出免 JS 侧 f16 解码,gp 体量小带宽无关紧要)。 */
+  const ACT = Q ? 2 : 4;
   const u = (usage, size) => device.createBuffer({ usage, size });
   const ST_R = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
   const ST_RW = ST_R | GPUBufferUsage.COPY_SRC;
@@ -80,19 +105,19 @@ export async function createAewnnSession(opt) {
     global: u(ST_R, CAP * GLOBAL_C * 4),
     syms: u(ST_R, CAP * 4),
     weights: u(ST_R, blob.byteLength),
-    trunk: u(ST_RW, CAP * HW * C_TRUNK * 4),
-    normed: u(ST_RW, CAP * HW * C_TRUNK * 4),
-    proj: u(ST_RW, CAP * HW * C_TRUNK * 4),
-    qh: u(ST_RW, CAP * NUM_HEADS * HW * HEAD_DIM * 4),
-    kh: u(ST_RW, CAP * NUM_HEADS * HW * HEAD_DIM * 4),
-    vh: u(ST_RW, CAP * NUM_HEADS * HW * HEAD_DIM * 4),
-    attn: u(ST_RW, CAP * HW * C_TRUNK * 4),
-    gate: u(ST_RW, CAP * HW * FFN_FUSED * 4),
-    hidden: u(ST_RW, CAP * HW * FFN * 4),
-    p1: u(ST_RW, CAP * HW * HEAD_C * 4),
-    actg: u(ST_RW, CAP * HW * HEAD_C * 4),
-    v1: u(ST_RW, CAP * HW * HEAD_C * 4),
-    act2: u(ST_RW, CAP * HW * HEAD_C * 4),
+    trunk: u(ST_RW, CAP * HW * C_TRUNK * ACT),
+    normed: u(ST_RW, CAP * HW * C_TRUNK * ACT),
+    proj: u(ST_RW, CAP * HW * C_TRUNK * ACT),
+    qh: u(ST_RW, CAP * NUM_HEADS * HW * HEAD_DIM * ACT),
+    kh: u(ST_RW, CAP * NUM_HEADS * HW * HEAD_DIM * ACT),
+    vh: u(ST_RW, CAP * NUM_HEADS * HW * HEAD_DIM * ACT),
+    attn: u(ST_RW, CAP * HW * C_TRUNK * ACT),
+    gate: u(ST_RW, CAP * HW * FFN_FUSED * ACT),
+    hidden: u(ST_RW, CAP * HW * FFN * ACT),
+    p1: u(ST_RW, CAP * HW * HEAD_C * ACT),
+    actg: u(ST_RW, CAP * HW * HEAD_C * ACT),
+    v1: u(ST_RW, CAP * HW * HEAD_C * ACT),
+    act2: u(ST_RW, CAP * HW * HEAD_C * ACT),
     gp: u(ST_RW, CAP * 3 * HEAD_C * 4),
     pol: u(ST_RW, CAP * HW * 2 * 4),
     pass: u(ST_RW, CAP * 2 * 4),
@@ -114,7 +139,7 @@ export async function createAewnnSession(opt) {
    * 入口名与 key 缺省一致;WGSL 保留字冲突的(如 pass → passHead)在此映射。 */
   const FN_OF = { pass: 'passHead' };
   const pipes = {};
-  for (const [name, code] of Object.entries(KERNELS)) {
+  for (const [name, code] of Object.entries(buildKernels(MODE))) {
     pipes[name] = device.createComputePipeline({
       layout: 'auto',
       compute: { module: device.createShaderModule({ code }), entryPoint: FN_OF[name] ?? name },
@@ -125,6 +150,12 @@ export async function createAewnnSession(opt) {
   const W = (name) => {
     const v = wOf(name);
     return { buffer: buf.weights, offset: v.byteOffset, size: v.byteLength };
+  };
+  /* 量化 scale 张量(f32 子区)绑定,仅 Q 模式的 trunk GEMM/stem 使用 */
+  const Ws = (name) => {
+    const r = parsed.range.get(name);
+    if (!r) throw new Error(`blob 缺 scale 张量 ${name}`);
+    return { buffer: buf.weights, offset: r.byteOffset, size: r.byteLength };
   };
   const B = (name) => ({ buffer: buf[name] });
 
@@ -144,37 +175,53 @@ export async function createAewnnSession(opt) {
   const elm = { n: 0 };
   const g2 = (k, o) => ({ n: 0, k, o });
 
-  add('stem', { zeroSlot },
+  /* 管道名选择:f32/f16w 模式用基本名(f16w 的基本名即 f16 权重变体);
+   * q 模式按 meta.quant 选 i8 管道或 32 变体(逐层敏感度排除)。 */
+  const pickKey = (qkey, base, isQ) => (MODE === 'q' ? (isQ ? qkey : `${base}32`) : base);
+  const stemQ = MODE === 'q' && (meta.quant ?? {})['stem.conv_w'];
+  /* f32 模式:f32 stem;q 模式排除 stem 时:f32 权重 + f16 io 的 stem32 */
+  add(pickKey('stem', 'stem', stemQ), { zeroSlot },
     ['U', B('spatial'), W('stem.conv_w'), W('stem.global_w'), B('global'),
-     { buffer: stemTbl }, B('syms'), B('trunk')],
+     { buffer: stemTbl }, B('syms'), B('trunk'),
+     ...(stemQ ? [Ws('stem.conv_w.s'), Ws('stem.global_w.s')] : [])],
     (n) => [Math.ceil(n * HW * C_TRUNK / 64)]);
 
   for (let b = 0; b < NUM_BLOCKS; b++) {
     /* PyTorch TransformerAttentionBlock(attn{b}):norm1 → qkv → RoPE → attn → out_proj → 残差 */
     add('rms', elm, ['U', B('trunk'), W(`attn${b}.norm`), B('normed')],
       (n) => [Math.ceil(n * HW / 64)]);
-    add('gemmQkv', g2(C_TRUNK, QKV_FUSED),
-      ['U', B('normed'), W(`attn${b}.qkv`), B('qh'), B('kh'), B('vh')],
+    const qkvQ = MODE !== 'f32' && (meta.quant ?? {})[`attn${b}.qkv`];
+    add(pickKey('gemmQkv', 'gemmQkv', qkvQ), g2(C_TRUNK, QKV_FUSED),
+      qkvQ ? [...['U', B('normed'), W(`attn${b}.qkv`), B('qh'), B('kh'), B('vh')], Ws(`attn${b}.qkv.s`)]
+        : ['U', B('normed'), W(`attn${b}.qkv`), B('qh'), B('kh'), B('vh')],
       (n) => [Math.ceil(QKV_FUSED / 16), Math.ceil(HW / 16), n]);
     add('rope', elm, ['U', B('qh'), B('kh'), { buffer: ropeCos }, { buffer: ropeSin }],
       (n) => [Math.ceil(n * NUM_HEADS * HW * (HEAD_DIM / 2) / 64)]);
     add('flash', elm, ['U', B('qh'), B('kh'), B('vh'), B('attn')],
       (n) => [Math.ceil(n * NUM_HEADS * HW / 64)]);
     /* gemmRes 绑定序:[uniform, in, W, out, res](out=新残差载体,res=块输入) */
-    add('gemmRes', g2(C_TRUNK, C_TRUNK),
-      ['U', B('attn'), W(`attn${b}.out`), B('proj'), B('trunk')],
+    /* gemmRes 绑定序:i8 [u,in,W,S,res,out];f32 [u,in,W,out,res](out=新残差载体,res=块输入) */
+    const outQ = MODE !== 'f32' && (meta.quant ?? {})[`attn${b}.out`];
+    add(pickKey('gemmRes', 'gemmRes', outQ), g2(C_TRUNK, C_TRUNK),
+      outQ ? ['U', B('attn'), W(`attn${b}.out`), Ws(`attn${b}.out.s`), B('trunk'), B('proj')]
+        : ['U', B('attn'), W(`attn${b}.out`), B('proj'), B('trunk')],
       (n) => [Math.ceil(C_TRUNK / 16), Math.ceil(HW / 16), n]);
 
     /* PyTorch TransformerFFNBlock(ffn{b}):norm → gate SwiGLU → ffn2 → 残差 */
     add('rms', elm, ['U', B('proj'), W(`ffn${b}.norm`), B('normed')],
       (n) => [Math.ceil(n * HW / 64)]);
-    add('gemmPlain', g2(C_TRUNK, FFN_FUSED),
-      ['U', B('normed'), W(`ffn${b}.gate`), B('gate')],
+    const gateQ = MODE !== 'f32' && (meta.quant ?? {})[`ffn${b}.gate`];
+    add(pickKey('gemmPlain', 'gemmPlain', gateQ), g2(C_TRUNK, FFN_FUSED),
+      gateQ ? ['U', B('normed'), W(`ffn${b}.gate`), Ws(`ffn${b}.gate.s`), B('gate')]
+        : ['U', B('normed'), W(`ffn${b}.gate`), B('gate')],
       (n) => [Math.ceil(FFN_FUSED / 16), Math.ceil(HW / 16), n]);
     add('swiglu', elm, ['U', B('gate'), B('hidden')],
       (n) => [Math.ceil(n * HW * FFN / 64)]);
-    add('gemmRes', g2(FFN, C_TRUNK),
-      ['U', B('hidden'), W(`ffn${b}.ffn2`), B('trunk'), B('proj')],
+    const f2Q = MODE !== 'f32' && (meta.quant ?? {})[`ffn${b}.ffn2`];
+    add(pickKey('gemmRes', 'gemmRes', f2Q), g2(FFN, C_TRUNK),
+      f2Q
+        ? ['U', B('hidden'), W(`ffn${b}.ffn2`), Ws(`ffn${b}.ffn2.s`), B('proj'), B('trunk')]
+        : ['U', B('hidden'), W(`ffn${b}.ffn2`), B('trunk'), B('proj')],
       (n) => [Math.ceil(C_TRUNK / 16), Math.ceil(HW / 16), n]);
   }
 
@@ -182,9 +229,9 @@ export async function createAewnnSession(opt) {
     (n) => [Math.ceil(n * HW * C_TRUNK / 64)]);
 
   /* PolicyHead */
-  add('gemmPlain', g2(C_TRUNK, HEAD_C), ['U', B('normed'), W('policy.conv1p'), B('p1')],
+  add(MODE === 'q' ? 'gemmPlain32' : 'gemmPlain', g2(C_TRUNK, HEAD_C), ['U', B('normed'), W('policy.conv1p'), B('p1')],
     (n) => [Math.ceil(HEAD_C / 16), Math.ceil(HW / 16), n]);
-  add('gemmBiasRelu', g2(C_TRUNK, HEAD_C),
+  add(MODE === 'q' ? 'gemmBiasRelu32' : 'gemmBiasRelu', g2(C_TRUNK, HEAD_C),
     ['U', B('normed'), W('policy.conv1g'), B('actg'), W('policy.conv1g_b')],
     (n) => [Math.ceil(HEAD_C / 16), Math.ceil(HW / 16), n]);
   add('poolPolicy', elm, ['U', B('actg'), B('gp')], (n) => [n]);
@@ -196,7 +243,7 @@ export async function createAewnnSession(opt) {
     W('policy.pass2'), B('pass')], () => [1]);
 
   /* ValueHead */
-  add('gemmBiasRelu', g2(C_TRUNK, HEAD_C),
+  add(MODE === 'q' ? 'gemmBiasRelu32' : 'gemmBiasRelu', g2(C_TRUNK, HEAD_C),
     ['U', B('normed'), W('value.conv1'), B('v1'), W('value.conv1_b')],
     (n) => [Math.ceil(HEAD_C / 16), Math.ceil(HW / 16), n]);
   add('poolValue', elm, ['U', B('v1'), B('gp')], (n) => [n]);
@@ -211,9 +258,10 @@ export async function createAewnnSession(opt) {
    * slot+2 = o;stem slot+1 = zeroSlot。其余内核只读 n。 */
   const params = new Uint32Array(dispatches.length * WORDS);
   for (const d of dispatches) {
-    if (d.pipe === pipes.gemmPlain || d.pipe === pipes.gemmRes
-      || d.pipe === pipes.gemmBiasRelu || d.pipe === pipes.gemmQkv
-      || d.pipe === pipes.gemmSmall) {
+    const isGemm = MODE === 'f32'
+      ? ['gemmPlain', 'gemmRes', 'gemmBiasRelu', 'gemmQkv', 'gemmSmall'].some((k) => d.pipe === pipes[k])
+      : ['gemmPlain', 'gemmRes', 'gemmQkv', 'gemmSmall', 'gemmPlain32', 'gemmBiasRelu32', 'gemmRes32', 'gemmQkv32'].some((k) => d.pipe === pipes[k]);
+    if (isGemm) {
       params[d.slot + 1] = d.params.k;
       params[d.slot + 2] = d.params.o;
     } else if (d.pipe === pipes.stem) {
@@ -226,6 +274,7 @@ export async function createAewnnSession(opt) {
    * writeBuffer 一次整体重写)。 */
   const uniformBuf = u(GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC, dispatches.length * SLOT);
   for (const d of dispatches) {
+    if (!d.pipe) console.error('[aewnn] 未定义管道,dispatch 表:', dispatches.map((x) => x.pipe ? Object.keys(pipes).find((k) => pipes[k] === x.pipe) : 'UNDEF').join(','));
     const layout = d.pipe.getBindGroupLayout(0);
     const entries = d.entries.map((e, bi) => ({
       binding: bi,

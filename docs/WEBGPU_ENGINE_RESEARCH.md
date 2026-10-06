@@ -293,6 +293,31 @@ Dawn node 绑定 `npm i --no-save webgpu`)→ `test/aewnn-stage-diff.mjs` / `aew
 4. **性能数字未出**:开发机(WSL2)Dawn 落在 llvmpipe 软件渲染,`test/aewnn-bench.mjs`
    只有软件下限;**M3 的真机 A/B(≥ort-web×0.9 闸门)仍待浏览器实测**,切换闸门不豁免。
 
+### 9.6 量化落地(同日晚;i8f16 = INT8 报告 §4.1 方案 A 的引擎侧实现)
+
+- **完全对齐 quant_explore 研究**(/home/a/go/trainrun/quant/,第 40 批权重
+  s68320512 重跑确认):全部 58 层 trunk(conv_spatial、linear_global、attn q/k/v/out、
+  ffn 三矩阵)逐输出通道对称 int8(clip=1.0;研究在 58 层上做了逐层裁剪搜索,
+  **全部 minmax 最优,无敏感离群值,不需要数据驱动权重校准**),4×int8 打包 u32;
+  头部(policy/value 全部)、RMSNorm、RoPE 按 model_pytorch.py 的 fp32 头部口径留 f32。
+  **0.91M 参数量化,blob 1.14MB(f32 的 30%)**。
+- **计算**:激活中间量 f16 存储、寄存器/共享内存/f32 累加(katago-webgpu「f16 storage +
+  fp32 compute」形态;即研究结论的 W8A16,激活保持 f16 不做 a8)。需要 adapter
+  `shader-f16`,不支持自动回落 **f16 权重版**(.f16.aewn,2.01MB;fp16 纯变体
+  Top1 99.62% ≈ 无损)—— 计算本就是 f16,f32 权重存储无发布意义,f32 blob 不入库。
+- **激活范围**(cpuref-Q 扫描):max absmax 54.9(hidden)≪ 65504,f16 存储安全。
+- **L2 输出级**(引擎 i8 vs ort CPU fp32 golden,30 例;权威对照 = quant_explore
+  第 40 批 8192 盘面 int8w 行:Top1 98.02% / KL 7.9e-4 / winMAE 5.1e-3 / 目差 0.061):
+  policy KL 9.7e-4 ✓、winLoss MAE 6.2e-3 ✓、目差 MAE 0.115 ✓、ownership 3.8e-3 ✓、
+  top1 含近平局 100%(4 例平局翻转,0 实质翻转)✓、pass 偏差 4.1e-2(绊线 0.1 ✓,
+  KL 已覆盖)。与研究报告数字同带,「W8A16 基本无损」在引擎侧复现。
+- **教训两则**:①packer 逐张量量化轴曾把 stem.global_w([OC][19])按 'last' 轴
+  量化,引擎按 stGS[oc] 读 → GPU 与 cpuref 分歧 0.3~4 logit,靠「WGSL-Q vs
+  cpuref-Q」隔离层定位(cpuref 与打包自洽,golden 又与 cpuref 一致,唯 GPU 独错);
+  ②WGSL 探针读 f16 中间缓冲必须显式 f16 解码,按 f32 误读会制造大量假差异。
+- **默认**:对弈页缺省加载量化版;`?weights=f32` 强制 fp32 golden 版;
+  适配器无 shader-f16 自动回落 f16 权重版。L3 对弈级(300 局等 visits)为遗留验收。
+
 ### 9.5 风险表销账情况
 
 - WGSL 移植数值 bug(§6-2):对拍链已建,逐内核可定位(stage-diff/gpu-probe);

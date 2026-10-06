@@ -41,8 +41,8 @@ const check = (name, cond, extra) => {
   if (!cond) failed++;
 };
 
-const blobBuf = readFileSync(join(ROOT, 'models/b8c96h3tfrs_19.aewn'));
-const blob = blobBuf.buffer.slice(blobBuf.byteOffset, blobBuf.byteOffset + blobBuf.byteLength);
+import { ensureBlob } from './blob-helper.mjs';
+const blob = ensureBlob('b8c96h3tfrs_19.aewn', ['f32']);
 
 const cpu = await createCpuRefSession(blob);
 const gpu = await createAewnnSession({ blob, calibrate: false, onStatus: () => {} });

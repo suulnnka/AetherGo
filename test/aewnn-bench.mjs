@@ -23,8 +23,8 @@ const { encodeFeatures } = await import(join(ROOT, 'src/nn/features.js'));
 const { createAewnnSession } = await import(join(ROOT, 'src/nn/webgpu/session.js'));
 const { pickBatchSizeFromThroughput } = await import(join(ROOT, 'src/nn/session.js'));
 
-const blobBuf = readFileSync(join(ROOT, 'models/b8c96h3tfrs_19.aewn'));
-const blob = blobBuf.buffer.slice(blobBuf.byteOffset, blobBuf.byteOffset + blobBuf.byteLength);
+const { ensureBlob } = await import('./blob-helper.mjs');
+const blob = ensureBlob('b8c96h3tfrs_19.aewn', ['f32']);
 
 const adapter = await navigator.gpu.requestAdapter();
 const ai = adapter.info ?? {};
@@ -59,4 +59,27 @@ for (const size of [1, 2, 4, 8, 16, 32]) {
 }
 console.log(`校准口径(≥最优90% 最小批)→ maxBatch = ${pickBatchSizeFromThroughput(entries)}`);
 gpu.dispose();
+
+/* 量化版(i8f16):int8 权重 + f16 激活,同口径对表 */
+const qbuf = ensureBlob('b8c96h3tfrs_19.i8.aewn', ['i8f16']);
+{
+  const t1 = performance.now();
+  const gq = await createAewnnSession({ blob: qbuf, calibrate: false, onStatus: () => {} });
+  console.log(`\n[量化版] 会话创建: ${(performance.now() - t1).toFixed(0)}ms,dispatch ${gq.dispatchCount}`);
+  const eq = [];
+  for (const size of [1, 8, 32]) {
+    const rows = Array.from({ length: size }, () => proto);
+    await gq.evalBatch(rows);
+    let minMs = Infinity;
+    for (let k = 0; k < 10; k++) {
+      const t = performance.now();
+      await gq.evalBatch(rows);
+      minMs = Math.min(minMs, performance.now() - t);
+    }
+    eq.push([size, size / minMs]);
+    console.log(`批 ${String(size).padStart(2)}: 总 ${minMs.toFixed(2)}ms = ${(size / minMs).toFixed(2)} rows/ms`);
+  }
+  console.log(`量化版 maxBatch = ${pickBatchSizeFromThroughput(eq)}`);
+  gq.dispose();
+}
 process.exit(0);
