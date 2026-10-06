@@ -57,7 +57,7 @@ srv.stdout.on("data", (ch) => {
 });
 const evalBatch = async (rows) => {
   const req = { rows: rows.map((r) => ({
-    spatial: Array.from(r.spatial), global: Array.from(r.global), optimism: r.optimism ?? 1.0 })) };
+    spatial: Array.from(r.spatial), global: Array.from(r.global), sym: r.sym ?? 0, optimism: r.optimism ?? 1.0 })) };
   return new Promise((res, rej) => {
     srv.stdout._wait = { res, rej };
     srv.stdin.write(JSON.stringify(req) + "\n");

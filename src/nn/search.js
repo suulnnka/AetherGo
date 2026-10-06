@@ -877,12 +877,16 @@ export async function nnSearchBest(bd, side, opt = {}) {
 
   /* ---- 主循环前置:根评估(λ=0.2)→ recentScoreCenter + 根先验 + 环快照 ---- */
   let rootOwnPre = null;                     // 根评估 ownership(行棋方视角 pretanh),终选 pass 守门用
-  /* 对称默认关(2026-10-07):sym 随行下发的新契约在实战对局中致棋力崩坏
-   * (同引擎 H2H:sym-on 0-6 且全部 73 手认输,sym-off 4-2;静态对拍/单局
-   * 轨迹 harness 均无法复现 —— 交互性回归,根因待查,见提交记录),在
-   * 根因修复前仅显式 opt.symmetry === true 才启用(浏览器 aewnn 路径
-   * 需要时显式打开)。 */
-  const useSym = opt.symmetry === true;
+  /* 对称默认开(2026-10-07 根因修复后恢复,对齐 KataGo nnRandomize=true /
+   * nneval.cpp 每评估随机 8 对称之一):此前的「实战崩坏」根因是对战
+   * harness 的行序列化丢 sym 字段 —— 服务端收不到 sym 按恒等特征评估,
+   * 引擎按契约反置换,策略/ownership 被随机旋转打乱(值输出为标量不受损,
+   * 故一切基于胜率的探针全绿;运行时自检实锤:同请求内 sym 行与 sym=0
+   * 影子行 wlΔ 精确为 0 = 两行喂了逐位相同的输入,policy L1 高达 244-995、
+   * argmax 分歧 63/65)。修 harness 序列化(补 sym 字段)后:L1 降至
+   * 137-213(网络真实非等变噪声,即对称的去相关收益),H2H sym-on 由
+   * 0-6@73手 变 4-2 正常局长。引擎机制本身自始至终正确。 */
+  const useSym = opt.symmetry !== false;
   if (opt.rngSeed !== undefined) symRng = (opt.rngSeed >>> 0) || 1;
   {
     const f = encodeFeatures(bd, side, { recentMoves: rootRecent, komi, outSpatial: spBuf, outGlobal: glBuf });

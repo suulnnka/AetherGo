@@ -25,7 +25,7 @@ srv.stdout.on("data", (ch) => {
 const evalBatchRaw = (rows) => new Promise((res, rej) => {
   srv._wait = { res, rej };
   srv.stdin.write(JSON.stringify({ rows: rows.map((r) => ({
-    spatial: Array.from(r.spatial), global: Array.from(r.global), optimism: r.optimism ?? 1.0 })) }) + "\n");
+    spatial: Array.from(r.spatial), global: Array.from(r.global), sym: r.sym ?? 0, optimism: r.optimism ?? 1.0 })) }) + "\n");
   setTimeout(() => rej(new Error("inf-timeout")), 240000);
 });
 const evalBatch = (rows) => srv._lock.then(() => {
