@@ -190,7 +190,7 @@ export async function createAewnnSession(opt) {
     /* PyTorch TransformerAttentionBlock(attn{b}):norm1 → qkv → RoPE → attn → out_proj → 残差 */
     add('rms', elm, ['U', B('trunk'), W(`attn${b}.norm`), B('normed')],
       (n) => [Math.ceil(n * HW / 64)]);
-    const qkvQ = MODE !== 'f32' && (meta.quant ?? {})[`attn${b}.qkv`];
+    const qkvQ = MODE === 'q' && (meta.quant ?? {})[`attn${b}.qkv`];
     add(pickKey('gemmQkv', 'gemmQkv', qkvQ), g2(C_TRUNK, QKV_FUSED),
       qkvQ ? [...['U', B('normed'), W(`attn${b}.qkv`), B('qh'), B('kh'), B('vh')], Ws(`attn${b}.qkv.s`)]
         : ['U', B('normed'), W(`attn${b}.qkv`), B('qh'), B('kh'), B('vh')],
@@ -201,7 +201,7 @@ export async function createAewnnSession(opt) {
       (n) => [Math.ceil(n * NUM_HEADS * HW / 64)]);
     /* gemmRes 绑定序:[uniform, in, W, out, res](out=新残差载体,res=块输入) */
     /* gemmRes 绑定序:i8 [u,in,W,S,res,out];f32 [u,in,W,out,res](out=新残差载体,res=块输入) */
-    const outQ = MODE !== 'f32' && (meta.quant ?? {})[`attn${b}.out`];
+    const outQ = MODE === 'q' && (meta.quant ?? {})[`attn${b}.out`];
     add(pickKey('gemmRes', 'gemmRes', outQ), g2(C_TRUNK, C_TRUNK),
       outQ ? ['U', B('attn'), W(`attn${b}.out`), Ws(`attn${b}.out.s`), B('trunk'), B('proj')]
         : ['U', B('attn'), W(`attn${b}.out`), B('proj'), B('trunk')],
@@ -210,14 +210,14 @@ export async function createAewnnSession(opt) {
     /* PyTorch TransformerFFNBlock(ffn{b}):norm → gate SwiGLU → ffn2 → 残差 */
     add('rms', elm, ['U', B('proj'), W(`ffn${b}.norm`), B('normed')],
       (n) => [Math.ceil(n * HW / 64)]);
-    const gateQ = MODE !== 'f32' && (meta.quant ?? {})[`ffn${b}.gate`];
+    const gateQ = MODE === 'q' && (meta.quant ?? {})[`ffn${b}.gate`];
     add(pickKey('gemmPlain', 'gemmPlain', gateQ), g2(C_TRUNK, FFN_FUSED),
       gateQ ? ['U', B('normed'), W(`ffn${b}.gate`), Ws(`ffn${b}.gate.s`), B('gate')]
         : ['U', B('normed'), W(`ffn${b}.gate`), B('gate')],
       (n) => [Math.ceil(FFN_FUSED / 16), Math.ceil(HW / 16), n]);
     add('swiglu', elm, ['U', B('gate'), B('hidden')],
       (n) => [Math.ceil(n * HW * FFN / 64)]);
-    const f2Q = MODE !== 'f32' && (meta.quant ?? {})[`ffn${b}.ffn2`];
+    const f2Q = MODE === 'q' && (meta.quant ?? {})[`ffn${b}.ffn2`];
     add(pickKey('gemmRes', 'gemmRes', f2Q), g2(FFN, C_TRUNK),
       f2Q
         ? ['U', B('hidden'), W(`ffn${b}.ffn2`), Ws(`ffn${b}.ffn2.s`), B('proj'), B('trunk')]
@@ -229,9 +229,9 @@ export async function createAewnnSession(opt) {
     (n) => [Math.ceil(n * HW * C_TRUNK / 64)]);
 
   /* PolicyHead */
-  add(MODE === 'q' ? 'gemmPlain32' : 'gemmPlain', g2(C_TRUNK, HEAD_C), ['U', B('normed'), W('policy.conv1p'), B('p1')],
+  add(MODE !== 'f32' ? 'gemmPlain32' : 'gemmPlain', g2(C_TRUNK, HEAD_C), ['U', B('normed'), W('policy.conv1p'), B('p1')],
     (n) => [Math.ceil(HEAD_C / 16), Math.ceil(HW / 16), n]);
-  add(MODE === 'q' ? 'gemmBiasRelu32' : 'gemmBiasRelu', g2(C_TRUNK, HEAD_C),
+  add(MODE !== 'f32' ? 'gemmBiasRelu32' : 'gemmBiasRelu', g2(C_TRUNK, HEAD_C),
     ['U', B('normed'), W('policy.conv1g'), B('actg'), W('policy.conv1g_b')],
     (n) => [Math.ceil(HEAD_C / 16), Math.ceil(HW / 16), n]);
   add('poolPolicy', elm, ['U', B('actg'), B('gp')], (n) => [n]);
@@ -243,7 +243,7 @@ export async function createAewnnSession(opt) {
     W('policy.pass2'), B('pass')], () => [1]);
 
   /* ValueHead */
-  add(MODE === 'q' ? 'gemmBiasRelu32' : 'gemmBiasRelu', g2(C_TRUNK, HEAD_C),
+  add(MODE !== 'f32' ? 'gemmBiasRelu32' : 'gemmBiasRelu', g2(C_TRUNK, HEAD_C),
     ['U', B('normed'), W('value.conv1'), B('v1'), W('value.conv1_b')],
     (n) => [Math.ceil(HEAD_C / 16), Math.ceil(HW / 16), n]);
   add('poolValue', elm, ['U', B('v1'), B('gp')], (n) => [n]);

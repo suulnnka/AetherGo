@@ -315,6 +315,13 @@ Dawn node 绑定 `npm i --no-save webgpu`)→ `test/aewnn-stage-diff.mjs` / `aew
   量化,引擎按 stGS[oc] 读 → GPU 与 cpuref 分歧 0.3~4 logit,靠「WGSL-Q vs
   cpuref-Q」隔离层定位(cpuref 与打包自洽,golden 又与 cpuref 一致,唯 GPU 独错);
   ②WGSL 探针读 f16 中间缓冲必须显式 f16 解码,按 f32 误读会制造大量假差异。
+- **f16 回退版**(dtype=2,.f16.aewn):trunk 权重 f16 存储 + f16 激活;头部仍 f32
+  权重(32 变体内核,f16 io)。工程教训三则:①packer 逐张量 f16 标记与
+  parseAewn 视图选择按 dtype 分流,曾把 f16 张量建出 Uint32Array 视图
+  (元素数减半 + 位型错乱 → cpuref-f16 vs golden 12.6 logit);②f16w 的
+  gemmRes 绑定序曾与 session 不一致(res/out 换位 → proj 全零);③头部曾
+  误路由到 f16 权重内核(blob 里头部是 f32)→ ±Inf/NaN。三者均由
+  「逐 dispatch 分段快照 + WGSL vs cpuref 双层隔离」定位。
 - **默认**:对弈页缺省加载量化版;`?weights=f32` 强制 fp32 golden 版;
   适配器无 shader-f16 自动回落 f16 权重版。L3 对弈级(300 局等 visits)为遗留验收。
 

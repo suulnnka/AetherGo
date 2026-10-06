@@ -144,7 +144,9 @@ function gemmQSource(epi, name, wkind = 'i8') {
   /* 绑定:[0]u [1]in [2]W [3](S=i8) [3|4](res/bias) [末]out。
    * res 输入 f16(残差载体),bias 向量 f32(头部常量)。wkind='f32' 用于
    * q 模式下被排除的张量(f32 权重 + f16 io,逐层敏感度排除用)。 */
-  const extraB = i8 ? 4 : 3;
+  /* 绑定序与 session 一致:f16+biasrelu 是 [u,in,W,out,bias](out@3,bias@4),
+   * 其余 res/bias 在 out 之后。 */
+  const extraB = 4;
   const extra = epi === 'res'
     ? `@group(0) @binding(${extraB}) var<storage, read>       geRes : array<f16>;`
     : epi === 'biasrelu'
@@ -155,7 +157,8 @@ function gemmQSource(epi, name, wkind = 'i8') {
     : epi === 'biasrelu'
       ? `acc = max(acc + f32(geBias[o]), 0.0);`
       : ``;
-  const outB = extraB + (epi === 'plain' ? 0 : 1);
+  /* i8:[0]u [1]in [2]W [3]S [4]res [5]out;非 i8:[0]u [1]in [2]W [3]out [4]res/bias。 */
+  const outB = i8 ? (epi === 'plain' ? 4 : 5) : 3;
   return /* wgsl */ `
 enable f16;
 struct GParams { n: u32, k: u32, o: u32, pad: u32 };
@@ -698,12 +701,12 @@ fn gemmSmall(@builtin(global_invocation_id) gid : vec3<u32>) {
     K.gemmRes32 = gemmQSource('res', 'gemmRes32', 'f32');
     K.gemmQkv32 = gemmQkvSource('f32', true, 'gemmQkv32');
   } else if (mode === 'f16w') {
-    /* 全部权重 f16,f16 io */
+    /* trunk 权重 f16,f16 io;头部仍 f32 权重(32 变体,f16 io) */
     K.gemmPlain = gemmQSource('plain', 'gemmPlain', 'f16');
     K.gemmRes = gemmQSource('res', 'gemmRes', 'f16');
     K.gemmQkv = gemmQkvSource('f16');
-    K.gemmPlain32 = gemmQSource('plain', 'gemmPlain32', 'f16');
-    K.gemmBiasRelu32 = gemmQSource('biasrelu', 'gemmBiasRelu32', 'f16');
+    K.gemmPlain32 = gemm32Source('plain', 'gemmPlain32');
+    K.gemmBiasRelu32 = gemm32Source('biasrelu', 'gemmBiasRelu32');
   } else {
     K.gemmPlain = gemmSource('plain', 'gemmPlain');
     K.gemmRes = gemmSource('res', 'gemmRes');

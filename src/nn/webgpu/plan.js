@@ -53,7 +53,7 @@ export function parseAewn(buffer) {
   const metaLen = dv.getUint32(12, true);
   const nTensors = dv.getUint32(16, true);
   if (version !== 1) throw new Error(`.aewn: 不支持的版本 ${version}`);
-  if (dtype !== 0 && dtype !== 1) throw new Error(`.aewn: 不支持的 dtype ${dtype}`);
+  if (dtype !== 0 && dtype !== 1 && dtype !== 2) throw new Error(`.aewn: 不支持的 dtype ${dtype}`);
   let off = 20;
   const dir = [];
   for (let i = 0; i < nTensors; i++) {
@@ -76,9 +76,11 @@ export function parseAewn(buffer) {
     if (t.tOff % 4 !== 0) throw new Error(`.aewn: 张量 ${t.name} 偏移未对齐`);
     range.set(t.name, { byteOffset: t.tOff, byteLength: t.nbytes });
     dims.set(t.name, t.dims);
-    w.set(t.name, quant[t.name]
+    w.set(t.name, quant[t.name] && dtype === 1
       ? new Uint32Array(buffer, t.tOff, t.nbytes >> 2)      // 4×int8 打包 u32
-      : new Float32Array(buffer, t.tOff, t.nbytes >> 2));
+      : quant[t.name] && dtype === 2
+        ? new Uint16Array(buffer, t.tOff, t.nbytes >> 1)    // f16 位型
+        : new Float32Array(buffer, t.tOff, t.nbytes >> 2));
   }
   return { meta, w, range, dims, dtype };
 }

@@ -232,6 +232,7 @@ if (dawn) {
   const { ensureBlob } = await import('./blob-helper.mjs');
   const f16buf = ensureBlob('b8c96h3tfrs_19.f16.aewn', ['f16']);
   const cpu16 = createCpuRefSession(f16buf, { scanActivations: true });
+  const { createAewnnSession } = await import(join(ROOT, 'src/nn/webgpu/session.js'));
   const gpu16 = await createAewnnSession({ blob: f16buf, calibrate: false, onStatus: () => {} });
   const rows16 = CASES.slice(0, 12).map(({ bd, side, moves, sym, optimism }) => {
     const f = encodeFeatures(bd, side, { recentMoves: moves, komi: 7.5 });
