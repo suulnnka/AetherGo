@@ -1,6 +1,14 @@
 /* ============================================================
  * AetherGo NN 版异步 PUCT 搜索 —— v4:图搜索(useGraphSearch,最终选点/效用同 v3)
  *
+ * == v4.5(2026-10-06):攒批逻辑改 KataGo 多线程投影(用户指令) ==
+ *   - 批上限 = 在途评估总量 T(线程数语义):在飞批 + 待发队列 ≤ T,
+ *     任何下降的统计盲区 ≤ T−1 —— KataGo「线程停在叶上等自己的评估」的
+ *     异步单线程等价。旧 v4.1 管线 minBatch 空闲凑满 + 在途时不计在途量,
+ *     盲区最深 2T−1:同代码 64v 自对弈批 1 对批 4 = 10-2、批 4 口径 vs
+ *     KataGo 1-5(批 1 口径 3-3),批税主因即此。死端/预算边界立即发射
+ *     手头半批(机会主义不凑批),批序严格。
+ *
  * == v4.4(2026-10-06):subtreeValueBias 移植(setup GTP 默认 0.45)==
  *   - 同「行棋方+上二手+落点 5×5 局部形(8 对称规范化)+劫」签名的节点共享
  *     在线表项,重算时累计(子树均值−自身评估)·origTotal^0.85,自身评估
@@ -405,8 +413,12 @@ export async function nnSearchBest(bd, side, opt = {}) {
   const temperatureHalflife = opt.temperatureHalflife ?? 0;
   /* 批上限:校准值(opt.maxBatch,session 加载时现测)优先,旧 opt.batch 兜底;
    * 再按预算压 stale(批 ≤ 预算/16 → 至少 16 轮回传,下限 2),小预算自动小批 */
+  /* 批上限 = 在途评估总量上限 T(虚拟线程数语义):在飞批 + 待发队列 ≤ T,
+   * 任何下降的统计盲区 ≤ T−1,与 KataGo numSearchThreads=T 的多线程语义一致
+   * (v4.5;旧 minBatch 凑批 + 在途不看量的上限使盲区最深 2T−1,同代码 64v
+   * 自对弈批 1 对批 4 = 10-2,见文件头)。沿用 opt.maxBatch(session 校准值)
+   * 与预算钳制(≥16 轮回传)。 */
   const maxBatch = Math.max(1, Math.min(opt.maxBatch ?? opt.batch ?? 4, Math.max(2, budget >> 4)));
-  const minBatch = Math.max(1, Math.min(maxBatch, 4));
   const evalBatch = opt.session.evalBatch.bind(opt.session);
   const rootRecent = opt.reuseTree === false ? (opt.recentMoves ?? []).slice() : (opt.recentMoves ?? []);
   const spBuf = new Float32Array(22 * N2), glBuf = new Float32Array(19);
@@ -946,14 +958,15 @@ export async function nnSearchBest(bd, side, opt = {}) {
     }
   };
 
-  /* ---- 单槽管线(双并行 + 需求驱动动态批):GPU 估值第 N 批时,主循环同步攒
-   * 第 N+1 批;在途批结果一到(inflight.done)立即停手发射手头半批,估值慢则攒到
-   * maxBatch 为止 —— KataGo waitPopUpToN「等一个、取空、不凑批」的单线程投影
-   * (nneval.cpp:839 + threadsafequeue.h:172),有效批大小随 GPU/下降耗时比涌现。
-   * GPU 空闲(无在途)时至少攒 minBatch 再发射。下降见到的统计 stale 恰一批
-   * (C++ 多线程原生语义);在途批的 evalPending 让下一批自动避开同节点;
-   * 预算计入在途,总访问仍收敛 budget。apply 严格按批序。 ---- */
-  let inflight = null;                        // { promise, pending, done }
+  /* ---- 虚拟多线程管线(KataGo numSearchThreads=T 的异步单线程投影,v4.5)----
+   * T = maxBatch:总在途(在飞批 + 待发队列)≤ T,下降的统计盲区 ≤ T−1 ——
+   * KataGo 线程「停在叶上等自己的评估,下降时最多盲于其它 T−1 个在途」的
+   * 精确等价;批序严格(先收上一批再发射),evalPending 使同批自动避开同节点;
+   * 死端/预算边界立即发射手头半批(机会主义,不凑批)。旧 v4.1 单槽管线的
+   * minBatch 空闲凑满 + 在途时 pending<maxBatch 不计在途量,盲区最深 2T−1
+   * —— 这正是同代码批 1 对批 4 自对弈 10-2 的差距来源(2026-10-06 实测),
+   * 批 4 口径 vs KataGo 1-5、批 1 口径 3-3。 ---- */
+  let inflight = null;                        // { promise, pending }
   const settleInflight = async () => {
     if (!inflight) return;
     applyBatch(inflight.pending, await inflight.promise);
@@ -961,9 +974,8 @@ export async function nnSearchBest(bd, side, opt = {}) {
   };
   while (iters < budget) {
     const pending = [];
-    while (pending.length < maxBatch
-      && iters + (inflight ? inflight.pending.length : 0) + pending.length < budget
-      && (inflight ? !inflight.done : pending.length < minBatch)) {
+    while ((inflight ? inflight.pending.length : 0) + pending.length < maxBatch
+      && iters + (inflight ? inflight.pending.length : 0) + pending.length < budget) {
     const e = descend();
     if (e.catchUpChild) {
       /* 追平折返(KataGo maybeCatchUpEdgeVisits → updateStatsAfterPlayout(父),
@@ -1021,15 +1033,12 @@ export async function nnSearchBest(bd, side, opt = {}) {
       for (let i = e.path.length - 1; i >= 1; i--) unmake(bd, e.path[i].move, e.path[i].tok);
     }
 
-    await settleInflight();                   // 先收上一批 —— 攒批期间 GPU 一直在跑(双并行)
+    await settleInflight();                   // 先收上一批,再发射攒下的(批序严格)
     if (pending.length === 0) continue;       // 预算已尽(或死端结算完):外层条件收口
-    const batch = {
+    inflight = {
       promise: evalBatch(pending.map((p) => ({ spatial: p.spatial, global: p.global }))),
       pending,
-      done: false,
     };
-    batch.promise.then(() => { batch.done = true; }, () => { batch.done = true; });
-    inflight = batch;                         // 结果一到攒批条件即退出(动态批)
   }
   await settleInflight();                     // 收尾:末批须在选点前回传
 
