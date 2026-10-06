@@ -32,13 +32,39 @@ SV   = next(n for n in names_out if "ScoreValue" in n)
 
 def softplus(x): return x if x > 30 else math.log1p(math.exp(x))
 N2 = 361
+
+# ---- 8 对称契约(与 src/nn/symmetry.js SYM8/permuteSpatial 同构造): ----
+# rows[i].sym 可省(缺省 0);sym≠0 时输入 spatial 按 dst[perm[p]]=src[p] 置换,
+# 输出(policy/ownership)留在置换坐标系 —— 引擎侧 unpermuteOut 还原。
+SYM8 = []
+for s8 in range(8):
+    m = []
+    for r in range(19):
+        for c in range(19):
+            rr, cc = r, c
+            for _ in range(s8 & 3):
+                rr, cc = cc, 19 - 1 - rr
+            if s8 & 4: cc = 19 - 1 - cc
+            m.append(rr * 19 + cc)
+    SYM8.append(np.array(m, dtype=np.int64))
+
 for line in sys.stdin:
     line = line.strip()
     if not line: continue
     req = json.loads(line)
     rows = req["rows"]
     n = len(rows)
-    sp = np.array([r["spatial"] for r in rows], dtype=np.float32).reshape(n, 22, 19, 19)
+    sp0 = np.array([r["spatial"] for r in rows], dtype=np.float32).reshape(n, 22, N2)
+    for i, r in enumerate(rows):
+        sym = int(r.get("sym") or 0)
+        if sym:
+            p = SYM8[sym]
+            for ch in range(22):
+                src = sp0[i, ch]
+                dst = np.empty_like(src)
+                dst[p] = src
+                sp0[i, ch] = dst
+    sp = sp0.reshape(n, 22, 19, 19)
     gl = np.array([r["global"] for r in rows], dtype=np.float32).reshape(n, 19, 1, 1)
     mk = np.ones((n, 1, 19, 19), dtype=np.float32)
     out = sess.run(None, {names_in[0]: sp, names_in[1]: gl, names_in[2]: mk})

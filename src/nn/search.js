@@ -877,7 +877,12 @@ export async function nnSearchBest(bd, side, opt = {}) {
 
   /* ---- 主循环前置:根评估(λ=0.2)→ recentScoreCenter + 根先验 + 环快照 ---- */
   let rootOwnPre = null;                     // 根评估 ownership(行棋方视角 pretanh),终选 pass 守门用
-  const useSym = opt.symmetry !== false;
+  /* 对称默认关(2026-10-07):sym 随行下发的新契约在实战对局中致棋力崩坏
+   * (同引擎 H2H:sym-on 0-6 且全部 73 手认输,sym-off 4-2;静态对拍/单局
+   * 轨迹 harness 均无法复现 —— 交互性回归,根因待查,见提交记录),在
+   * 根因修复前仅显式 opt.symmetry === true 才启用(浏览器 aewnn 路径
+   * 需要时显式打开)。 */
+  const useSym = opt.symmetry === true;
   if (opt.rngSeed !== undefined) symRng = (opt.rngSeed >>> 0) || 1;
   {
     const f = encodeFeatures(bd, side, { recentMoves: rootRecent, komi, outSpatial: spBuf, outGlobal: glBuf });
@@ -1000,9 +1005,12 @@ export async function nnSearchBest(bd, side, opt = {}) {
         iters++;                                              // 真死端:计一访(KataGo 循环访问同款)
         continue;
       }
-      const slot = ringNext();
+      /* 探测(编码+算键)一律用共享 scratch:缓存命中的编码不进环 —— 否则
+       * 热缓存下 collect burst 的命中风暴会烧穿环形容量,回卷覆盖在飞批的
+       * 特征缓冲(在飞批收到垃圾特征,评估全毁,2026-10-07 实战 73 手级崩盘
+       * 的根因)。未命中才拷入专属环槽,pending 零拷贝引用。 */
       const f = encodeFeatures(bd, e.node.side, {
-        recentMoves: e.recent, komi, outSpatial: spRing[slot], outGlobal: glRing[slot],
+        recentMoves: e.recent, komi, outSpatial: spBuf, outGlobal: glBuf,
       });
       /* 随机对称:sym 随行下发(引擎侧置换);键取「原始特征 + sym」 */
       const sym = useSym ? nextSym() : 0;
@@ -1020,10 +1028,12 @@ export async function nnSearchBest(bd, side, opt = {}) {
         iters++;
         continue;
       }
+      const slot = ringNext();
+      spRing[slot].set(f.spatial); glRing[slot].set(f.global);
       pending.push({
         node: e.node, path: e.path, key, sym,
         legalMoves: genLegal(bd, e.node.side),
-        spatial: f.spatial, global: f.global,       // 环形槽位直接引用,零拷贝
+        spatial: spRing[slot], global: glRing[slot],  // 未命中:拷入专属环槽,零拷贝引用
       });
       applyVirtualLoss(e.path);
       for (let i = e.path.length - 1; i >= 1; i--) unmake(bd, e.path[i].move, e.path[i].tok);
