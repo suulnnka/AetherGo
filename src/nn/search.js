@@ -92,6 +92,7 @@ import {
 } from '../engine.js';
 import { encodeFeatures } from './features.js';
 import { lookupEval, storeEval, fevalKey, clearEvalCache as clearEvalCacheImpl } from './eval-cache.js';
+import { SYM8, unpermuteOut } from './symmetry.js';
 import { pickBest, pickMove, effectiveTemperature } from './move-select.js';
 
 /* 兼容再导出:测试与外部只认 search.js 一个入口。
@@ -133,40 +134,26 @@ const TWO_OVER_PI = 2 / Math.PI;
 const SQRT_AREA = Math.sqrt(N2);
 
 /* ==================== 搜索随机对称(KataGo nnEvaluator 同款) ====================
- * 每次评估随机取 8 对称之一:spatial 全通道按 SYM8[s] 置换(所有通道均为盘面
- * 点映射,几何置换等价于「变换局面后编码」—— nninputs.cpp 对称同口径),
- * global 与值输出(winLoss/scoreMean/policyPass)为不变量;policy/ownership
- * 按逆置换(dst[p] = src[perm[p]])还原到恒等坐标系。模型经对称增广训练,
- * 对变换输入的评估 ≈ 变换输出,残差即去相关评估噪声 —— 打破确定性访问
- * 锁定(2026-10-06 P7 集中度:C3:57 vs KataGo 运行带 23-35,KataGo 侧即靠
- * 此噪声维持访问分散,恒等对称的引擎则单点锁死)。
- * 评估缓存键取变换后特征(同变换同键才命中,「同输入必同输出」不变量保持,
- * 等效 8 个子缓存)。opt.symmetry === false 关闭(位置敏感桩测试用);
- * opt.rngSeed 固定种子可复现(测试)。SYM8 定义于文件尾,调用期引用无碍。 */
+ * 每次评估随机取 8 对称之一,把对称编号随行下发(rows[i].sym)—— 置换在
+ * **引擎侧**做(aewnn:stem 卷积按 gather 表直接以变换后坐标取输入,零 CPU
+ * 置换;ort 路径:session 内 CPU 置换,成本同旧版)。global 与值输出
+ * (winLoss/scoreMean/policyPass)为不变量;policy/ownership 按逆置换
+ * (unpermuteOut,dst[p] = src[perm[p]])还原到恒等坐标系。模型经对称增广
+ * 训练,对变换输入的评估 ≈ 变换输出,残差即去相关评估噪声 —— 打破确定性
+ * 访问锁定(2026-10-06 P7 集中度:C3:57 vs KataGo 运行带 23-35,KataGo 侧
+ * 即靠此噪声维持访问分散,恒等对称的引擎则单点锁死)。
+ * 评估缓存键取「原始特征 + sym」(同变换同键才命中,「同输入必同输出」
+ * 不变量保持,等效 8 个子缓存)。opt.symmetry === false 关闭(位置敏感桩
+ * 测试用);opt.rngSeed 固定种子可复现(测试)。SYM8/unpermuteOut 见
+ * ./symmetry.js。特征编码进环形槽位(spRing/glRing):在飞批 + 攒批各持
+ * 一份槽位,pending 跨 await 引用安全且零拷贝(aewnn 在 evalBatch 调用的
+ * 同步前缀里直传 GPU,随后槽位即可复用,环形容量按 2×maxBatch 兜底)。 */
 let symRng = ((Date.now() ^ (Math.random() * 0x7fffffff)) >>> 0) || 0x9e3779b9;
 function nextSym() {
   let x = symRng;
   x ^= (x << 13) >>> 0; x ^= x >>> 17; x ^= (x << 5) >>> 0;
   symRng = x >>> 0;
   return x & 7;
-}
-function permuteSpatial(src, perm, dst) {
-  const ch = (src.length / N2) | 0;
-  for (let c = 0; c < ch; c++) {
-    const off = c * N2;
-    for (let p = 0; p < N2; p++) dst[off + perm[p]] = src[off + p];
-  }
-  return dst;
-}
-function unpermuteOut(out, perm) {
-  const policy = new Float32Array(N2);
-  for (let p = 0; p < N2; p++) policy[p] = out.policy[perm[p]];
-  const ownership = out.ownership ? (() => {
-    const o = new Float32Array(N2);
-    for (let p = 0; p < N2; p++) o[p] = out.ownership[perm[p]];
-    return o;
-  })() : out.ownership;
-  return { ...out, policy, ownership };
 }
 
 /* ==================== subtreeValueBias(searchupdatehelpers.cpp:287 / subtreevaluebiastable.cpp,setup GTP 默认 0.45) ====================
@@ -422,6 +409,14 @@ export async function nnSearchBest(bd, side, opt = {}) {
   const evalBatch = opt.session.evalBatch.bind(opt.session);
   const rootRecent = opt.reuseTree === false ? (opt.recentMoves ?? []).slice() : (opt.recentMoves ?? []);
   const spBuf = new Float32Array(22 * N2), glBuf = new Float32Array(19);
+  /* 特征环形槽位(零拷贝发送):叶子特征直接编码进槽,pending 跨 await 引用;
+   * 在飞批 + 攒批最多同时占用 2×maxBatch 份,容量再加余量。槽位在
+   * applyBatch 后自然回收(按计数取模复用)。 */
+  const ringCap = 2 * (maxBatch ?? 8) + 8;
+  const spRing = Array.from({ length: ringCap }, () => new Float32Array(22 * N2));
+  const glRing = Array.from({ length: ringCap }, () => new Float32Array(19));
+  let ringCounter = 0;
+  const ringNext = () => (ringCounter++ % ringCap);
   let cacheHits = 0;
   let recentScoreCenter = 0;
 
@@ -880,10 +875,7 @@ export async function nnSearchBest(bd, side, opt = {}) {
   {
     const f = encodeFeatures(bd, side, { recentMoves: rootRecent, komi, outSpatial: spBuf, outGlobal: glBuf });
     const rootSym = useSym ? nextSym() : 0;
-    const rootSpatial = rootSym
-      ? permuteSpatial(f.spatial, SYM8[rootSym], new Float32Array(f.spatial.length))
-      : f.spatial;
-    const [out0] = await evalBatch([{ spatial: rootSpatial, global: f.global, optimism: ROOT_OPTIMISM }]);
+    const [out0] = await evalBatch([{ spatial: f.spatial, global: f.global, sym: rootSym, optimism: ROOT_OPTIMISM }]);
     const out = rootSym ? unpermuteOut(out0, SYM8[rootSym]) : out0;
     rootOwnPre = out.ownership ?? null;
     const sem = semOf(out, side);
@@ -1001,16 +993,13 @@ export async function nnSearchBest(bd, side, opt = {}) {
         iters++;                                              // 真死端:计一访(KataGo 循环访问同款)
         continue;
       }
+      const slot = ringNext();
       const f = encodeFeatures(bd, e.node.side, {
-        recentMoves: e.recent, komi, outSpatial: spBuf, outGlobal: glBuf,
+        recentMoves: e.recent, komi, outSpatial: spRing[slot], outGlobal: glRing[slot],
       });
-      /* 随机对称:采样 → spatial 置换(拷贝,pending 跨异步持有)→ 键取变换后
-       * 特征(同变换同键才命中缓存) */
+      /* 随机对称:sym 随行下发(引擎侧置换);键取「原始特征 + sym」 */
       const sym = useSym ? nextSym() : 0;
-      const spatial = sym
-        ? permuteSpatial(f.spatial, SYM8[sym], new Float32Array(f.spatial.length))
-        : Float32Array.from(f.spatial);
-      const key = fevalKey(spatial, f.global);
+      const key = fevalKey(f.spatial, f.global, sym);
       const cached = lookupEval(key);
       if (cached) {
         cacheHits++;
@@ -1027,7 +1016,7 @@ export async function nnSearchBest(bd, side, opt = {}) {
       pending.push({
         node: e.node, path: e.path, key, sym,
         legalMoves: genLegal(bd, e.node.side),
-        spatial, global: Float32Array.from(f.global),
+        spatial: f.spatial, global: f.global,       // 环形槽位直接引用,零拷贝
       });
       applyVirtualLoss(e.path);
       for (let i = e.path.length - 1; i >= 1; i--) unmake(bd, e.path[i].move, e.path[i].tok);
@@ -1036,7 +1025,7 @@ export async function nnSearchBest(bd, side, opt = {}) {
     await settleInflight();                   // 先收上一批,再发射攒下的(批序严格)
     if (pending.length === 0) continue;       // 预算已尽(或死端结算完):外层条件收口
     inflight = {
-      promise: evalBatch(pending.map((p) => ({ spatial: p.spatial, global: p.global }))),
+      promise: evalBatch(pending.map((p) => ({ spatial: p.spatial, global: p.global, sym: p.sym }))),
       pending,
     };
   }
@@ -1106,23 +1095,7 @@ export async function nnSearchBest(bd, side, opt = {}) {
 }
 
 /* ==================== 根对称剪枝(保守式) ==================== */
-
-const SYM8 = (() => {
-  const syms = [];
-  for (let s = 0; s < 8; s++) {
-    const map = new Int32Array(N2);
-    for (let r = 0; r < N; r++) {
-      for (let c = 0; c < N; c++) {
-        let rr = r, cc = c;
-        for (let k = 0; k < (s & 3); k++) { const t = rr; rr = cc; cc = N - 1 - t; }
-        if (s & 4) cc = N - 1 - cc;
-        map[r * N + c] = rr * N + cc;
-      }
-    }
-    syms.push(map);
-  }
-  return syms;
-})();
+/* SYM8 已抽至 ./symmetry.js(自研 WebGPU 引擎与搜索共用同一份定义) */
 
 function pruneSymmetricRootMoves(children, bd) {
   if (!children || children.length < 2) return;

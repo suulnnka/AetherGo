@@ -11,6 +11,13 @@
 共 4.44MB)改为 ONNX 图内现场计算(图首 Sin/Cos 子图生成共享表,应用结构不动),
 `models/b8c96h3tfrs_19.onnx` 8.2MB→3.79MB;输出等价(相对误差 ~5e-7)、IO 契约不变
 零前端改动(转换脚本 `training/make_rope_ongraph.py`,删表前逐表校验)。
+2026-10-06:**自研 WebGPU 推理引擎 aethernn 上线,运行时依赖归零** —— 删除 5.5MB 的
+onnxruntime-web CDN 依赖(离线可用、无单点);423 节点 ONNX 图固化为 84 个 dispatch 的
+硬编码执行计划(顺序逐块镜像 PyTorch forward;qkv/ffn-gate 融合 GEMM、残差入 epilogue、
+flash attention、BiasMask 折叠、RoPE 打包期预算),权重经 `training/pack_aewn.py` 打包为
+`models/b8c96h3tfrs_19.aewn`(3.82MB);8 对称随机置换下沉 GPU(stem 卷积 gather 表),
+搜索侧特征零拷贝直传。对拍全绿(vs ort CPU:policy 1.4e-5;WGSL vs CPU 参考:2.7e-5),
+nn-e2e 完整终局。真机性能 A/B 后再删 ort 逃生舱(`?engine=ort`)。
 
 **在线体验:** 打开 <https://suulnnka.github.io/AetherWebOS/> 启动「围棋」应用 —— 那里面跑的就是本引擎
 (默认高级档,窗口信息行实时显示演棋局数 / 胜率 / 耗时)。
@@ -54,8 +61,10 @@ src/protocol.js   契约常量(盘面尺寸 / 走法编码 / 记谱)—— UI �
 src/rules.js      规则核心:走子/撤销、合法性、禁全同(Zobrist)、洪泛工作区
 src/scoring.js    数子与死子:中国规则数子、Benson + 提子搜索、ownership 辅助标注
 src/engine.js     对外门面:再导出 rules + scoring(既有 import 路径不变)
-src/nn/           对弈搜索:features(特征)→ session(ort-web)→ search(PUCT),
+src/nn/           对弈搜索:features(特征)→ session(引擎门面)→ search(PUCT),
                   辅助模块 flood / ladder(征子)/ eval-cache(评估缓存)/ move-select(选点)
+src/nn/webgpu/    自研推理引擎 aethernn(plan 执行计划 + 15 个 WGSL 内核 + 单 pass 宿主
+                  + cpuref 参考解释器);权重经 training/pack_aewn.py 打包为 .aewn
 src/nn-worker.js  Worker 门面:UI 唯一入口,一切引擎事实经消息获取
 pages/            对弈页 UI:app.js(控制器)+ dom.js(通用 DOM)+ board.js(棋盘绘制)
 ```
@@ -115,7 +124,8 @@ UI 与引擎严格分离:UI 不 import 任何引擎代码,只 import `src/protoc
 
 ## NN 搜索(src/nn/)
 
-`src/nn-worker.js`(Worker)→ `src/nn/session.js`(ort-web 会话,**仅 WebGPU**)
+`src/nn-worker.js`(Worker)→ `src/nn/session.js`(引擎门面,默认**自研 aethernn**,
+仅 WebGPU;`?engine=ort` 切回 onnxruntime-web 逃生舱,两者 evalBatch 契约同构)
 → `src/nn/search.js`(异步 PUCT 批量搜索)+ `src/nn/features.js`(fillRowV7 特征,
 与 KataGo C++ 逐位对拍通过,征子通道另与原生实现对拍 8393 链零分歧)。
 特征编码的征子历史通道走**滚动盘面环**(KataGo `recentBoards` 同款,make 增量维护,
@@ -268,6 +278,11 @@ npm run test:featdiff               # 特征对拍(需先用 katago 产数据,�
 npm run test:nn-e2e                 # NN 自对弈端到端(需 python onnxruntime)
 npm run match                       # NN vs NN 对战(等 visits)
 node test/nn-temp-test.mjs          # 温度选点分布(LCB / 抽样)
+
+npm run test:aewnn                  # 自研引擎对拍:WGSL vs CPU 参考 + CPU 参考 vs ort
+                                    # golden(需 bleed 环境 onnxruntime;Dawn 绑定 npm i --no-save webgpu)
+npm run bench:aewnn                 # 自研引擎吞吐基准(Dawn;WSL2 上为软件渲染下限)
+npm run diff:aewnn                  # 分段对拍工具(内核回归定位用)
 ```
 
 围棋没有 perft,规则正确性的金标准是**模糊测试**:随机对局 40 局 × 最多 420 手,

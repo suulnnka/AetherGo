@@ -304,7 +304,8 @@ GTP 配方全套 + 图搜索全部落地(search.js v4 图搜索重写;全量单�
 ## 7. 明确不做(技术侧;产品级不做清单在 README)
 
 - 不在浏览器里训练或跑自对弈(训练全在本地 GPU 的 C++ 侧);
-- 不自研 WebGPU 算子(onnxruntime-web 不够用时再评估,先假设够用);
+- 不自研 WebGPU 算子 —— **2026-10-06 推翻并落地**(aethernn,见 docs/WEBGPU_ENGINE_RESEARCH.md
+  §9:对拍全绿后默认切换;ort-web 保留为 `?engine=ort` 逃生舱,真机 A/B 达标后删除);
 - 不做 INT8 / fp16 量化(fp32 起步,体积与速度真成瓶颈再上,主仓库有现成量化工具);
 - 不为「看起来强」堆未验证的搜索技巧 —— 每一项对拍 / 自对弈数据说话;
 - 不自写训练侧搜索 / 数据格式(selfplay / shuffle / train / gatekeeper / dumponnx 全用官方工具链)。
@@ -313,7 +314,7 @@ GTP 配方全套 + 图搜索全部落地(search.js v4 图搜索重写;全量单�
 
 | 风险 | 对策 |
 |---|---|
-| ort-web WebGPU 对新导出的 ONNX 图兼容性差 | N1 端到端已验证;每代学生出炉先过浏览器端到端再上线;出问题换后端需重新拍板(WASM 回退已按裁决不做) |
+| ort-web WebGPU 对新导出的 ONNX 图兼容性差 | **2026-10-06 随 aethernn 落地整体消除**:架构固定、一次验证(.aewn 计划互验,架构不符启动即报);ort-web 仅存逃生舱 |
 | 特征编码不一致导致「训练强、浏览器弱」 | 逐位对拍是硬验收;N3 每代抽测浏览器实局 |
 | 训练数据量 / 质量不足 | 学生已用 kata1 冷启动保底;N3 曲线不行先翻量,老师可换更强官方网 |
 | WebGPU 移动端覆盖(Safari 旧版等) | 不支持即明确报错(裁决:不做慢速兜底);N4 实测圈定可用范围 |
@@ -322,6 +323,11 @@ GTP 配方全套 + 图搜索全部落地(search.js v4 图搜索重写;全量单�
 
 ## 9. 里程碑存档
 
+- **2026-10-06**:自研 WebGPU 引擎 aethernn 立项并当日完成 Node 侧全链(packer → 15 WGSL
+  内核 → 单 pass/单 submit 宿主 → 8 对称 GPU 侧置换 + 特征零拷贝直传);对拍闸门全绿
+  (vs ort CPU golden:policy 1.4e-5 / winLoss 1.0e-6 / ownership 1.9e-6;WGSL vs CPU 参考
+  2.7e-5),现有测试与 nn-e2e 全过;默认引擎切 aethernn,ort-web 降为逃生舱,
+  运行时依赖归零(5.5MB CDN wasm 不再加载)。真机性能 A/B(≥ort-web×0.9 闸门)待浏览器实测。
 - **2026-10-01**:立项;N0~N2 全链打通(规则 / 特征对拍 / ort-web 会话 / 异步 PUCT /
   Worker 接线);蒸馏路线定稿(旁路采集 + PyTorch 蒸馏,否决 npz 与零搜索直出);
   9 路学生 35 分钟蒸馏出炉,等 visits 16:10 胜官方同尺寸老网。

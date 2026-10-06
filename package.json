@@ -12,7 +12,10 @@
     "test": "node test/engine-test.mjs && node test/features-test.mjs && node test/katago-align-test.mjs && node test/worker-smoke-test.mjs",
     "test:featdiff": "node test/featdiff.mjs /tmp/featdiff.json && node test/featdiff.mjs /tmp/featdiff20.json",
     "test:nn-e2e": "node test/nn-e2e.mjs",
-    "match": "node test/nn-match.mjs"
+    "match": "node test/nn-match.mjs",
+    "test:aewnn": "node test/aewnn-wgsl-test.mjs && node test/aewnn-cpuref-test.mjs",
+    "bench:aewnn": "node test/aewnn-bench.mjs",
+    "diff:aewnn": "node test/aewnn-stage-diff.mjs && node test/aewnn-gpu-probe.mjs"
   },
   "license": "MIT",
   "repository": {

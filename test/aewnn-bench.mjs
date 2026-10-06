@@ -1,0 +1,62 @@
+/* aewnn 吞吐基准(Dawn,dawn-node 环境)。
+ *
+ * 注意:WSL2 开发机上 Dawn 通常落在 llvmpipe(软件 Vulkan),数字只反映
+ * 软件渲染下限,不代表目标设备 —— 与 ort-web 的正式 A/B 按调研 M3 闸门
+ * 在浏览器(桌面 Chrome + 中端 Android)实测。本基准的用途:
+ *   1. 满容量批(CAP=32)与全 dispatch 链的烟测;
+ *   2. 校准口径(≥最优 90% 的最小批)在真设备上的现成测速器;
+ *   3. 会话创建耗时(shader 编译 × 84 + 权重上传)。
+ * 运行:node test/aewnn-bench.mjs
+ */
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+const ROOT = join(HERE, '..');
+const dawn = await import('webgpu');
+Object.assign(globalThis, dawn.globals);
+Object.defineProperty(globalThis, 'navigator', { value: { gpu: dawn.create([]) }, configurable: true });
+
+const { BLACK, newBoard } = await import(join(ROOT, 'src/engine.js'));
+const { encodeFeatures } = await import(join(ROOT, 'src/nn/features.js'));
+const { createAewnnSession } = await import(join(ROOT, 'src/nn/webgpu/session.js'));
+const { pickBatchSizeFromThroughput } = await import(join(ROOT, 'src/nn/session.js'));
+
+const blobBuf = readFileSync(join(ROOT, 'models/b8c96h3tfrs_19.aewn'));
+const blob = blobBuf.buffer.slice(blobBuf.byteOffset, blobBuf.byteOffset + blobBuf.byteLength);
+
+const adapter = await navigator.gpu.requestAdapter();
+const ai = adapter.info ?? {};
+console.log(`adapter: ${ai.vendor ?? '?'} ${ai.architecture ?? ''} ${ai.device ?? ''}(${ai.description ?? ''})`);
+const t0 = performance.now();
+const gpu = await createAewnnSession({ blob, calibrate: false, onStatus: () => {} });
+const loadMs = performance.now() - t0;
+console.log(`会话创建(含 84 pipeline 编译 + 3.8MB 权重上传): ${loadMs.toFixed(0)}ms,dispatch ${gpu.dispatchCount}`);
+
+/* 中盘特征 ×32 份做满容量验证与吞吐 */
+const bd = newBoard();
+const SEQ = [[3,3],[15,15],[3,15],[15,3],[9,9],[3,9],[15,9],[9,3],[9,15],[5,5],[13,13]];
+for (let i = 0; i < SEQ.length; i++) { void bd; }
+const f = encodeFeatures(newBoard(), BLACK, { recentMoves: [], komi: 7.5 });
+
+const proto = { spatial: f.spatial, global: f.global, sym: 0, optimism: 1.0 };
+const entries = [];
+for (const size of [1, 2, 4, 8, 16, 32]) {
+  const rows = Array.from({ length: size }, () => proto);
+  await gpu.evalBatch(rows);                        // 预热
+  let minMs = Infinity, minSync = Infinity;
+  for (let k = 0; k < 10; k++) {
+    const t = performance.now();
+    const p = gpu.evalBatch(rows);                  // 同步前缀:输入 writeBuffer + uniform 补丁
+    const tSync = performance.now() - t;            //   = JS 侧准备工作(不含 GPU 执行)
+    await p;                                        //   余下 = GPU 执行 + 读回 map + 后处理
+    const tTotal = performance.now() - t;
+    if (tTotal < minMs) { minMs = tTotal; minSync = tSync; }
+  }
+  entries.push([size, size / minMs]);
+  console.log(`批 ${String(size).padStart(2)}: 总 ${minMs.toFixed(2)}ms(JS 准备 ${minSync.toFixed(2)}ms)= ${(size / minMs).toFixed(2)} rows/ms`);
+}
+console.log(`校准口径(≥最优90% 最小批)→ maxBatch = ${pickBatchSizeFromThroughput(entries)}`);
+gpu.dispose();
+process.exit(0);

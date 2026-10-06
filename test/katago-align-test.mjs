@@ -13,6 +13,7 @@
 import { N, N2, BLACK, WHITE, PASS, newBoard, make, syncPosition } from '../src/engine.js';
 import { nnSearchBest, isOwnTrueEye, countDame, clearEvalCache, __nodeTableSize, __clearBiasTable } from '../src/nn/search.js';
 import { calibrateMaxBatch, pickBatchSizeFromThroughput } from '../src/nn/session.js';
+import { SYM8 } from '../src/nn/symmetry.js';
 
 let failed = 0;
 const check = (name, cond, extra) => {
@@ -318,12 +319,13 @@ const search = (bd, opts) => nnSearchBest(bd, BLACK, {
 }
 
 /* ==================== 11. 搜索随机对称(nnEvaluator 同款) ====================
- * v4.3:每次评估随机取 8 对称之一(spatial 置换发送,policy/ownership 逆置换
- * 还原)。等变性往返检验:桩从收到的(已变换)spatial 通道 1(己方子)定位
- * 孤子标记 q0,回 policy 热点于 R180(q0);引擎逆置换后恒等系热点 =
- * σ⁻¹·R180·σ(p0) = R180(p0) —— R180 是 D4 群中心,共轭不变 —— 无论采样
- * 到哪个对称,选点必须落在固定空点,以此验证置换/逆置换方向正确。
- * rngSeed 固定时评估序列确定 → 变换后特征键复现 → 二次搜索命中缓存。 */
+ * 2026-10-06 起 sym 随行下发(rows[i].sym),置换在引擎侧做(aewnn:GPU stem
+ * gather;ort:session 内 CPU 置换)。等变性往返检验:桩从原始 spatial 通道 1
+ * (己方子)定位孤子标记 p0,按收到的 sym 前向置换得 q0 = σ(p0),回 policy
+ * 热点于 R180(q0);引擎逆置换后恒等系热点 = σ⁻¹·R180·σ(p0) = R180(p0) ——
+ * R180 是 D4 群中心,共轭不变 —— 无论采样到哪个对称,选点必须落在固定空点,
+ * 以此验证置换/逆置换方向正确。
+ * rngSeed 固定时评估序列确定 → 「原始特征+sym」键复现 → 二次搜索命中缓存。 */
 {
   const p0 = sq(3, 3), pT = 360 - p0;
   const symStub = () => ({ async evalBatch(items) {
@@ -331,7 +333,7 @@ const search = (bd, opts) => nnSearchBest(bd, BLACK, {
       const policy = new Float32Array(N2).fill(-20);
       let q0 = -1;
       for (let p = 0; p < N2; p++) if (r.spatial[N2 + p] > 0.5) { q0 = p; break; }
-      if (q0 >= 0) policy[360 - q0] = 6;
+      if (q0 >= 0) policy[360 - SYM8[r.sym ?? 0][q0]] = 6;
       return { policy, policyPass: -20, winLoss: 0.3 };
     });
   } });

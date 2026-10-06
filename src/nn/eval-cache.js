@@ -30,8 +30,10 @@ export const lookupEval = evalCacheGet;
 export const storeEval = evalCachePut;
 
 /* 双种子 FNV-1a:把特征缓冲定点哈希成字符串键。特征每次都按同一算法生成,
- * 位级一致(填 0 后哈希,未写段恒 0);双种子把碰撞概率压到可忽略。 */
-export function fevalKey(sp, gl) {
+ * 位级一致(填 0 后哈希,未写段恒 0);双种子把碰撞概率压到可忽略。
+ * sym(8 对称编号,缺省 0)并进键:同盘面不同对称 = 不同条目(等效 8 个
+ * 子缓存,「同输入必同输出」不变量保持 —— 置换在引擎侧做,见 symmetry.js)。 */
+export function fevalKey(sp, gl, sym = 0) {
   const u32sp = new Uint32Array(sp.buffer, sp.byteOffset, sp.byteLength >> 2);
   const u32gl = new Uint32Array(gl.buffer, gl.byteOffset, gl.byteLength >> 2);
   let h1 = 0x811c9dc5, h2 = 0x01000193;
@@ -43,5 +45,5 @@ export function fevalKey(sp, gl) {
     h1 = Math.imul(h1 ^ u32gl[i], 16777619);
     h2 = Math.imul(h2 + u32gl[i] ^ (i * 40503 | 0), 16777619);
   }
-  return `${h1},${h2}`;
+  return `${h1},${h2},${sym | 0}`;
 }

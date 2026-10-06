@@ -329,7 +329,7 @@ function endGame(score, isResign = false) {
 }
 
 /* ---------- Worker:难度表 / 局面事实 / 搜索都经它 ----------
- * 唯一引擎:src/nn-worker.js(onnxruntime-web + WebGPU 推理,
+ * 唯一引擎:src/nn-worker.js(aethernn 自研 WebGPU 推理,?engine=ort 切 ort-web 逃生舱),
  * PUCT 搜索对齐 KataGo;UCT 随机演棋引擎已于 2026-10-02 移除)。 */
 let worker = null, reqSeq = 0, stateSeq = 0, statePending = null;
 let nnLoaded = false, nnWanted = false; // 模型是否就绪 / 是否在等它思考
@@ -372,7 +372,10 @@ function ensureWorker() {
   levelSel.disabled = true;
   levelSel.title = 'NN 引擎加载中…';
   infoL.textContent = 'NN:加载运行时与模型…';
-  worker.postMessage({ id: ++reqSeq, type: 'load', modelUrl: NN_MODEL_URL });
+  /* 引擎选择:aewnn 缺省;页面 URL ?engine=ort 切 onnxruntime-web 逃生舱
+   * (Worker 里读不到页面 location,须经 load 消息显式下发)。 */
+  const engine = new URLSearchParams(location.search).get('engine') ?? undefined;
+  worker.postMessage({ id: ++reqSeq, type: 'load', modelUrl: NN_MODEL_URL, engine });
   return worker;
 }
 
