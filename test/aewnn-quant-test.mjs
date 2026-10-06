@@ -226,49 +226,6 @@ if (dawn) {
   console.log('\n(无 Dawn 绑定,跳过 WGSL-Q 层)');
 }
 
-/* 第 4 层:f16 权重回退版(dtype=2,报告 fp16 纯变体:Top1 99.62% ≈ 无损)。
- * cpuref-f16 vs golden 应接近无损;WGSL-f16w vs cpuref-f16 应在 f16 舍入带内。 */
-if (dawn) {
-  const { ensureBlob } = await import('./blob-helper.mjs');
-  const f16buf = ensureBlob('b8c96h3tfrs_19.f16.aewn', ['f16']);
-  const cpu16 = createCpuRefSession(f16buf, { scanActivations: true });
-  const { createAewnnSession } = await import(join(ROOT, 'src/nn/webgpu/session.js'));
-  const gpu16 = await createAewnnSession({ blob: f16buf, calibrate: false, onStatus: () => {} });
-  const rows16 = CASES.slice(0, 12).map(({ bd, side, moves, sym, optimism }) => {
-    const f = encodeFeatures(bd, side, { recentMoves: moves, komi: 7.5 });
-    return { spatial: f.spatial, global: f.global, sym, optimism };
-  });
-  const gRows16 = CASES.slice(0, 12).map(({ bd, side, moves, sym, optimism }) => {
-    const f = encodeFeatures(bd, side, { recentMoves: moves, komi: 7.5 });
-    return {
-      spatial: Array.from(sym ? permuteSpatial(f.spatial, SYM8[sym], new Float32Array(f.spatial.length)) : f.spatial),
-      global: Array.from(f.global),
-      optimism,
-    };
-  });
-  const [g16, c16, w16] = await Promise.all([
-    golden(gRows16), cpu16.evalBatch(rows16), gpu16.evalBatch(rows16),
-  ]);
-  let dp = 0, dw = 0;
-  CASES.slice(0, 12).forEach((_, i) => {
-    for (let p = 0; p < N2; p++) dp = Math.max(dp, Math.abs(g16[i].policy[p] - c16[i].policy[p]));
-    dw = Math.max(dw, Math.abs(g16[i].winLoss - c16[i].winLoss));
-  });
-  console.log(`\n== f16 回退版(dtype=2)==`);
-  console.log(`cpuref-f16 vs golden: policy max|Δ|=${dp.toExponential(3)} winLoss ${dw.toExponential(3)}`);
-  check('f16 权重 ≈ 无损(policy ≤2e-2)', dp < 0.02, `${dp.toExponential(2)}`);
-  check('f16 权重 ≈ 无损(winLoss ≤2e-3)', dw < 2e-3, `${dw.toExponential(2)}`);
-  let dpw = 0, dow = 0;
-  CASES.slice(0, 12).forEach((_, i) => {
-    for (let p = 0; p < N2; p++) dpw = Math.max(dpw, Math.abs(c16[i].policy[p] - w16[i].policy[p]));
-    for (let p = 0; p < N2; p++) dow = Math.max(dow, Math.abs(c16[i].ownership[p] - w16[i].ownership[p]));
-  });
-  console.log(`WGSL-f16w vs cpuref-f16: policy max|Δ|=${dpw.toExponential(3)} ownership ${dow.toExponential(3)}`);
-  check('f16w 内核舍入带(policy ≤0.05)', dpw < 0.05, `${dpw.toExponential(2)}`);
-  check('f16w 内核舍入带(ownership ≤0.02)', dow < 0.02, `${dow.toExponential(2)}`);
-  gpu16.dispose();
-}
-
 server.stdin.end();
 server.kill();
 process.exit(failed ? 1 : 0);

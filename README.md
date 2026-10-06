@@ -25,12 +25,10 @@ f32 的 30%)—— 完全按量化研究(quant_explore,第 40 批权重)执行:�
 计算 f16 激活存储/f32 累加(W8A16,激活不做 a8);头部/norm/RoPE 按 PyTorch fp32
 头部口径留 f32。引擎侧 30 例对拍与研究 8192 盘面 int8w 行同带(KL 9.7e-4 /
 winMAE 6.2e-3 / top1 含近平局 100%,0 实质翻转),「W8A16 基本无损」在引擎侧复现。
-回退产物为 **f16 权重版**(`models/b8c96h3tfrs_19.f16.aewn`,2.01MB,fp16 纯变体
-Top1 99.62% ≈ 无损)。三份权重全部入库:f32 golden(`.aewn`,3.82MB,对拍基准)、
-i8 量化版(默认)、f16 回退版(2026-10-07 拍板不允许删)。
-`?weights=f32` 切 golden 通道;无 shader-f16 自动回落 f16 版。遗留:L3 对弈级验收
-(300 局等 visits)。另修复:packer 曾把 stem.global_w([OC][19])按列轴量化,
-GPU 按通道读 → 引擎侧 0.3~4 logit 偏差,已改首维轴并重打包。
+`?weights=f32` 留 golden 通道;设备无 shader-f16 与不支持 WebGPU 同款直接报错
+(不做 f16 权重回退,f16 版已撤销并清出仓库与历史)。遗留:L3 对弈级验收(300 局
+等 visits)。另修复:packer 曾把 stem.global_w([OC][19])按列轴量化,GPU 按通道读 →
+引擎侧 0.3~4 logit 偏差,已改首维轴并重打包。
 
 **在线体验:** 打开 <https://suulnnka.github.io/AetherWebOS/> 启动「围棋」应用 —— 那里面跑的就是本引擎
 (默认高级档,窗口信息行实时显示演棋局数 / 胜率 / 耗时)。

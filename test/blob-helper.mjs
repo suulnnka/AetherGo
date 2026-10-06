@@ -1,7 +1,6 @@
 /* 测试辅助:确保 .aewn blob 在场(缺失时调 packer 现做)。
  *
- * 三份 blob 全部入库(2026-10-07 拍板:f32/i8/f16 不允许删):
- *   .i8.aewn 默认 / .f16.aewn 回退 / .aewn fp32 golden。
+ * 入库两份:.i8.aewn 默认 / .aewn fp32 golden(f16 权重版已撤销清出)。
  * helper 只兜底「本地缺文件」的场景(如新克隆后未跑 packer)。*/
 import { existsSync, readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';

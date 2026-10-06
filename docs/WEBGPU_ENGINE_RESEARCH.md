@@ -302,9 +302,8 @@ Dawn node 绑定 `npm i --no-save webgpu`)→ `test/aewnn-stage-diff.mjs` / `aew
   头部(policy/value 全部)、RMSNorm、RoPE 按 model_pytorch.py 的 fp32 头部口径留 f32。
   **0.91M 参数量化,blob 1.14MB(f32 的 30%)**。
 - **计算**:激活中间量 f16 存储、寄存器/共享内存/f32 累加(katago-webgpu「f16 storage +
-  fp32 compute」形态;即研究结论的 W8A16,激活保持 f16 不做 a8)。需要 adapter
-  `shader-f16`,不支持自动回落 **f16 权重版**(.f16.aewn,2.01MB;fp16 纯变体
-  Top1 99.62% ≈ 无损)—— 计算本就是 f16,f32 权重存储无发布意义,f32 blob 不入库。
+  fp32 compute」形态;即研究结论的 W8A16,激活保持 f16 不做 a8)。设备无
+  `shader-f16` 与不支持 WebGPU 同款**直接报错,不做降级**。
 - **激活范围**(cpuref-Q 扫描):max absmax 54.9(hidden)≪ 65504,f16 存储安全。
 - **L2 输出级**(引擎 i8 vs ort CPU fp32 golden,30 例;权威对照 = quant_explore
   第 40 批 8192 盘面 int8w 行:Top1 98.02% / KL 7.9e-4 / winMAE 5.1e-3 / 目差 0.061):
@@ -315,18 +314,11 @@ Dawn node 绑定 `npm i --no-save webgpu`)→ `test/aewnn-stage-diff.mjs` / `aew
   量化,引擎按 stGS[oc] 读 → GPU 与 cpuref 分歧 0.3~4 logit,靠「WGSL-Q vs
   cpuref-Q」隔离层定位(cpuref 与打包自洽,golden 又与 cpuref 一致,唯 GPU 独错);
   ②WGSL 探针读 f16 中间缓冲必须显式 f16 解码,按 f32 误读会制造大量假差异。
-- **f16 回退版**(dtype=2,.f16.aewn):trunk 权重 f16 存储 + f16 激活;头部仍 f32
-  权重(32 变体内核,f16 io)。工程教训三则:①packer 逐张量 f16 标记与
-  parseAewn 视图选择按 dtype 分流,曾把 f16 张量建出 Uint32Array 视图
-  (元素数减半 + 位型错乱 → cpuref-f16 vs golden 12.6 logit);②f16w 的
-  gemmRes 绑定序曾与 session 不一致(res/out 换位 → proj 全零);③头部曾
-  误路由到 f16 权重内核(blob 里头部是 f32)→ ±Inf/NaN。三者均由
-  「逐 dispatch 分段快照 + WGSL vs cpuref 双层隔离」定位。
-- **产物入库(2026-10-07 拍板)**:f32 golden(.aewn, 3.82MB)/ i8 默认(1.14MB)/
-  f16 回退(2.01MB)三份全部入库,不允许删;f32 由 packer 从 onnx 确定性再生
-  (已验证逐字节一致)。
-- **默认**:对弈页缺省加载量化版;`?weights=f32` 强制 fp32 golden 版;
-  适配器无 shader-f16 自动回落 f16 权重版。L3 对弈级(300 局等 visits)为遗留验收。
+- **产物入库(2026-10-07 拍板,二次修正)**:.onnx(源)+ .i8.aewn(默认)+
+  .aewn(f32 golden)三份入库;**f16 权重版按二次拍板撤销**——既不做运行时
+  回退(无 shader-f16 即报错),也已从仓库与历史清出(git filter-repo)。
+- **默认**:对弈页缺省加载量化版;`?weights=f32` 强制 fp32 golden 版。
+  L3 对弈级(300 局等 visits)为遗留验收。
 
 ### 9.5 风险表销账情况
 

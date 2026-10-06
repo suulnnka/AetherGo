@@ -57,6 +57,11 @@ export async function createAewnnSession(opt) {
   });
 
   status('加载权重 blob');
+  /* 无 shader-f16 与不支持 WebGPU 同款处理:直接报错,不做任何降级
+   * (量化推理 f16 激活需要;f16 权重回退已撤销)。 */
+  if (!f16ok && !opt.weightsF32) {
+    throw new Error('当前设备不支持 shader-f16(量化推理需要),无法加载;需 Chrome/Edge 113+ 等支持 WebGPU f16 的浏览器');
+  }
   let blob;
   if (opt.blob) {
     blob = opt.blob;                               // 测试直载(Node fetch 不支持 file://)
@@ -65,13 +70,9 @@ export async function createAewnnSession(opt) {
     }
   } else {
     const base = opt.aewnUrl ?? opt.modelUrl.replace(/\.onnx([?#].*)?$/, '');
-    /* 缺省链:量化版(.i8.aewn)→ f16 权重版(.f16.aewn;计算本就是 f16,f32 blob 无意义)。
-     * ?weights=f32 才找 fp32 版(golden/测试用),找不到自动落 f16 版。 */
-    const wantQ = !opt.__noQuant && !opt.weightsF32 && f16ok;
+    /* 缺省:量化版(.i8.aewn);?weights=f32 走 fp32 golden 版。无 f16 回退。 */
     const urls = opt.aewnUrl ? [opt.aewnUrl]
-      : wantQ ? [`${base}.i8.aewn`, `${base}.f16.aewn`]
-        : opt.weightsF32 ? [`${base}.aewn`, `${base}.f16.aewn`]
-          : [`${base}.f16.aewn`];
+      : opt.weightsF32 ? [`${base}.aewn`] : [`${base}.i8.aewn`];
     let resp = null, url = '';
     for (const u of urls) {
       resp = await fetch(u);
@@ -79,8 +80,7 @@ export async function createAewnnSession(opt) {
     }
     if (!resp || !resp.ok) throw new Error(`权重 blob 加载失败(HTTP ${resp?.status}): ${urls.join(', ')}`);
     blob = await resp.arrayBuffer();
-    status(url.endsWith('.i8.aewn') ? '权重:int8 量化版(W8A16 + f16 激活)'
-      : url.endsWith('.f16.aewn') ? '权重:f16 权重版' : '权重:fp32 版');
+    status(url.endsWith('.i8.aewn') ? '权重:int8 量化版(W8A16 + f16 激活)' : '权重:fp32 版');
   }
   const parsed = parseAewn(blob);
   const { meta, w: weights } = parsed;
