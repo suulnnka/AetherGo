@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>AetherGo 浏览器 A/B:onnx vs f32 vs i8(64v 批4)</title>
+<style>
+  body { font: 13px/1.5 Consolas, monospace; background: #111; color: #cde; margin: 16px; }
+  h1 { font-size: 15px; color: #fff; }
+  #log { white-space: pre-wrap; }
+  .hl { color: #fd5; }
+  .err { color: #f66; }
+</style>
+</head>
+<body>
+<h1>AetherGo 浏览器 A/B:onnx(ORT-Web) vs aewnn-f32 vs aewnn-i8 —— bench + 循环赛(64v,批4,6 局)</h1>
+<div id="log"></div>
+<script type="module">
+import { newBoard, genLegal, make, isLegal, finalScore, PASS, BLACK, WHITE, N, N2 } from '/src/engine.js';
+import { createSession } from '/src/nn/session.js';
+import { calibrateMaxBatch, pickBatchSizeFromThroughput } from '/src/nn/calibrate.js';
+/* bench 用独立实例(reuseTree:false 本地表,不污染对局);对局每后端一份
+ * 持久实例(nodeTable/treeKeep/biasTable 跨该后端的对局保持 = worker 生命期产品口径;
+ * query 变体 URL = 独立模块记录,三棵树互不可见,对战双方绝不互串) */
+import { nnSearchBest as sbBench } from '/src/nn/search.js?iso=bench';
+import { nnSearchBest as sbOnnx } from '/src/nn/search.js?iso=match-onnx';
+import { nnSearchBest as sbF32 } from '/src/nn/search.js?iso=match-f32';
+import { nnSearchBest as sbI8 } from '/src/nn/search.js?iso=match-i8';
+
+const MODEL_URL = '/models/b8c96h3tfrs_19.onnx';
+const VISITS = 64, MAXB = 4, PLY_CAP = 760;
+const BENCH_ONLY = new URLSearchParams(location.search).has('bench');  // ?bench=1 只测速不对战
+const SWEEP_ONLY = new URLSearchParams(location.search).has('sweep');  // ?sweep=1 批 1/2/4/8/16 吞吐扫描
+const CALIB_PROBE = new URLSearchParams(location.search).has('calib'); // ?calib=1 校准算法探针
+const VBENCH = new URLSearchParams(location.search).has('vbench');     // ?vbench=1 1024v 吞吐 vs KataGo
+const BACKENDS = [
+  { id: 'onnx', search: sbOnnx, mk: (o) => createSession({ ...o, engine: 'ort',  modelUrl: MODEL_URL }) },
+  { id: 'f32',  search: sbF32,  mk: (o) => createSession({ ...o, engine: 'aewnn', modelUrl: MODEL_URL, weightsF32: true }) },
+  { id: 'i8',   search: sbI8,   mk: (o) => createSession({ ...o, engine: 'aewnn', modelUrl: MODEL_URL, weightsF32: false }) },
+];
+const PAIRS = [[0, 1], [0, 2], [1, 2]];   // onnx-f32, onnx-i8, f32-i8,每对 2 局(换先手色)
+
+const state = { phase: 'init', startedAt: new Date().toISOString(), ua: navigator.userAgent, webgpu: null, events: [], bench: {}, games: [], summary: null };
+const logEl = document.getElementById('log');
+function log(text, cls = '') {
+  const line = `[${new Date().toISOString().slice(11, 19)}] ${text}`;
+  const div = document.createElement('div');
+  if (cls) div.className = cls;
+  div.textContent = line;
+  logEl.appendChild(div);
+  state.events.push({ t: Date.now(), text: line });
+  window.__AB = state;
+  return fetch('/report', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(state) }).catch(() => {});
+}
+const mulberry32 = (a) => () => {
+  a |= 0; a = (a + 0x6D2B79F5) | 0;
+  let t = Math.imul(a ^ (a >>> 15), 1 | a);
+  t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+  return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+};
+const stats = (xs) => {
+  const s = [...xs].sort((a, b) => a - b);
+  const mean = s.reduce((a, b) => a + b, 0) / s.length;
+  return { n: s.length, min: s[0], p50: s[(s.length - 1) >> 1], mean };
+};
+
+/* ---------------- 单后端性能:批4 微基准 + 64v 真实搜索 ---------------- */
+async function benchOne(b) {
+  log(`[${b.id}] 加载会话…`, 'hl');
+  const tLoad0 = performance.now();
+  const s = await b.mk({ onStatus: (t) => log(`[${b.id}]   ${t}`) });
+  const loadS = (performance.now() - tLoad0) / 1000;
+  const out = { ep: s.ep, calibratedMaxBatch: s.maxBatch ?? null, loadS: +loadS.toFixed(2) };
+  log(`[${b.id}] 会话就绪(${s.ep},校准批上限 ${out.calibratedMaxBatch}),加载 ${loadS.toFixed(1)}s`, 'hl');
+
+  const rows = Array.from({ length: MAXB }, () => ({ spatial: new Float32Array(22 * N2), global: new Float32Array(19) }));
+  for (let i = 0; i < 10; i++) await s.evalBatch(rows);      // 预热(shader/pipeline 编译)
+  const times = [];
+  for (let i = 0; i < 60; i++) {
+    const t0 = performance.now();
+    await s.evalBatch(rows);
+    times.push(performance.now() - t0);
+  }
+  const st = stats(times);
+  out.batch4 = {
+    minMs: +st.min.toFixed(2), p50Ms: +st.p50.toFixed(2), meanMs: +st.mean.toFixed(2),
+    rowsPerSecMin: +(MAXB * 1000 / st.min).toFixed(1),
+    rowsPerSecP50: +(MAXB * 1000 / st.p50).toFixed(1),
+    rowsPerSecMean: +(MAXB * 1000 / st.mean).toFixed(1),
+  };
+  log(`[${b.id}] 批4 evalBatch:min ${st.min.toFixed(2)}ms / p50 ${st.p50.toFixed(2)}ms / mean ${st.mean.toFixed(2)}ms → ${out.batch4.rowsPerSecP50} 行/s(p50)`, 'hl');
+
+  const sts = [];
+  for (let i = 0; i < 3; i++) {
+    const bd = newBoard();
+    const t0 = performance.now();
+    await sbBench(bd, i % 2, { session: s, visits: VISITS, maxBatch: MAXB, reuseTree: false, recentMoves: [] });
+    sts.push(performance.now() - t0);
+  }
+  out.search64v = stats(sts.map((x) => +x.toFixed(1)));
+  log(`[${b.id}] 64v 搜索(空盘×3):p50 ${out.search64v.p50.toFixed(0)}ms / min ${out.search64v.min.toFixed(0)}ms`, 'hl');
+  await s.dispose?.();
+  return out;
+}
+
+/* ---------------- 一局:A/B 两会话对弈(64v 批4,tools/diff/match.mjs 同款认输规则) ---------------- */
+async function playGame(bA, bB, aBlack, rngSeed, pairName, gameIdx) {
+  const bd = newBoard();
+  const moves = [];
+  const rng = mulberry32(rngSeed);
+  let side = 0, lastPass = false, resigned = null;
+  const hist = [[], []];                       // 认输判据:各侧最近 ≤3 手白方视角 mcts 值
+  const ms = { A: 0, B: 0 }, cnt = { A: 0, B: 0 }, nn = { A: 0, B: 0 };
+  for (let t = 0; t < PLY_CAP; t++) {
+    if (t < 2) {                               // 开局 2 手随机(种子固定,可复现)
+      const legal = genLegal(bd, side);
+      const mv = legal[(rng() * legal.length) | 0];
+      moves.push(mv); make(bd, mv, side); side ^= 1; lastPass = false;
+      continue;
+    }
+    const aTurn = (side === 0) === aBlack;
+    const key = aTurn ? 'A' : 'B';
+    const inst = aTurn ? bA : bB;
+    const r = await inst.search(bd, side, { session: inst.session, visits: VISITS, maxBatch: MAXB, recentMoves: moves.slice() });
+    ms[key] += r.ms; cnt[key]++; nn[key] += r.nnCalls ?? 0;
+    const wlStm = r.winRate * 2 - 1;
+    const h = hist[aTurn ? 0 : 1];
+    h.push(side === BLACK ? -wlStm : wlStm);   // → 白方视角
+    if (h.length > 3) h.shift();
+    const losing = side === WHITE ? ((v) => v < -0.90) : ((v) => v > 0.90);
+    if (moves.length >= 73 && h.length >= 3 && h.every(losing)) { resigned = key; break; }
+    if (r.move !== PASS && !isLegal(bd, side, r.move)) throw new Error(`非法着法 ${r.move} (${key})`);
+    const pass = r.move === PASS;
+    moves.push(r.move);
+    if (pass && lastPass) break;
+    lastPass = pass;
+    make(bd, r.move, side);
+    side ^= 1;
+    if (t % 50 === 0) {
+      const wrBlack = side === BLACK ? r.winRate : 1 - r.winRate;
+      log(`  ${pairName} 局${gameIdx + 1}: 第${t}手(黑视角胜率 ${wrBlack.toFixed(2)})`);
+    }
+  }
+  /* winner 统一用侧位 'A'|'B';margin 为黑方目差 */
+  let winner, margin = null, how;
+  if (resigned) {
+    winner = resigned === 'A' ? 'B' : 'A';
+    how = `${resigned} 侧认输(中盘)`;
+  } else {
+    margin = finalScore(bd).margin;
+    winner = margin > 0 ? (aBlack ? 'A' : 'B') : (aBlack ? 'B' : 'A');
+    how = `数子 黑+${margin.toFixed(1)}`;
+  }
+  const aWon = winner === 'A';
+  return {
+    pair: pairName, game: gameIdx, a: bA.id, b: bB.id, aBlack,
+    winner: winner === 'A' ? bA.id : bB.id, aWon, how, plies: moves.length, margin,
+    msTotal: { A: +ms.A.toFixed(0), B: +ms.B.toFixed(0) },
+    movesSide: cnt,
+    msPerMove: { A: +(ms.A / Math.max(1, cnt.A)).toFixed(0), B: +(ms.B / Math.max(1, cnt.B)).toFixed(0) },
+    nnCalls: nn,
+  };
+}
+
+/* ---------------- 批 1/2/4/8/16 吞吐扫描(?sweep=1) ---------------- */
+const SWEEP_SIZES = [1, 2, 4, 8, 16, 32, 64];
+const mkRows = (n) => Array.from({ length: n }, () => ({ spatial: new Float32Array(22 * N2), global: new Float32Array(19) }));
+async function sweepOne(b) {
+  log(`[${b.id}] 加载会话(calibrate off)…`, 'hl');
+  const s = await b.mk({ onStatus: (t) => log(`[${b.id}]   ${t}`), calibrate: false });
+  const out = { ep: s.ep };
+  for (const n of SWEEP_SIZES) {
+    const rows = mkRows(n);
+    for (let i = 0; i < 5; i++) await s.evalBatch(rows);       // 预热(ORT 按形状 JIT)
+    const times = [];
+    for (let i = 0; i < 40; i++) {
+      const t0 = performance.now();
+      await s.evalBatch(rows);
+      times.push(performance.now() - t0);
+    }
+    const st = stats(times);
+    out[n] = {
+      minMs: +st.min.toFixed(2), p50Ms: +st.p50.toFixed(2),
+      rowsPerSecMin: +(n * 1000 / st.min).toFixed(1),
+      rowsPerSecP50: +(n * 1000 / st.p50).toFixed(1),
+    };
+    log(`[${b.id}] 批${n}: p50 ${st.p50.toFixed(2)}ms → ${out[n].rowsPerSecP50} 行/s(min ${st.min.toFixed(2)}ms → ${out[n].rowsPerSecMin})`, 'hl');
+  }
+  await s.dispose?.();
+  return out;
+}
+
+/* ---------------- 校准算法探针(?calib=1) ----------------
+ * 与 calibrate.js 逐行同逻辑的插桩复刻(冷管线,产品同条件)→ 逐档记录
+ * warmup 耗时/min/迭代数/是否被 deadline 截断;另跑「预算排除首编译」修复
+ * 变体、ground-truth 细测、以及真 calibrateMaxBatch ×3(热态)。 */
+async function calibProbe(b) {
+  const mk = (n) => Array.from({ length: n }, () => ({ spatial: new Float32Array(22 * N2), global: new Float32Array(19) }));
+  const now = () => performance.now();
+  const s = await b.mk({ onStatus: (t) => log(`[${b.id}]   ${t}`), calibrate: false });
+  const out = { ep: s.ep, replica: null, replicaFix: null, ground: null, direct: [] };
+
+  const replica = async (excludeFirstCompile) => {
+    const sizes = [2, 4, 8, 16, 32], iters = 6;
+    if (excludeFirstCompile) await s.evalBatch(mk(2));       // 首编译(管线 lazy build)不算预算
+    const deadline = now() + 2500;
+    const entries = [], steps = [];
+    let broke = false;
+    for (const size of sizes) {
+      const rows = mk(size);
+      const w0 = now();
+      await s.evalBatch(rows);
+      const warmMs = now() - w0;
+      if (now() + warmMs > deadline) { steps.push({ size, warmMs: +warmMs.toFixed(1), cut: true }); broke = true; break; }
+      let minMs = Infinity, nIters = 0;
+      for (let k = 0; k < iters && now() < deadline; k++) {
+        const t0 = now();
+        await s.evalBatch(rows);
+        const ms = now() - t0;
+        if (ms < minMs) minMs = ms;
+        nIters++;
+      }
+      entries.push([size, size / minMs]);
+      steps.push({ size, warmMs: +warmMs.toFixed(1), minMs: +minMs.toFixed(2), t: +(size / minMs).toFixed(1), nIters });
+    }
+    return { entries, picked: pickBatchSizeFromThroughput(entries), steps, broke };
+  };
+
+  out.replica = await replica(false);
+  log(`[${b.id}] 复刻(产品条件): picked=${out.replica.picked} broke=${out.replica.broke} ` +
+    out.replica.steps.map((x) => `批${x.size}${x.cut ? '截断' : `:warm ${x.warmMs}ms min ${x.minMs}ms t=${x.t} ×${x.nIters}`}`).join(' | '), 'hl');
+
+  out.replicaFix = await replica(true);
+  log(`[${b.id}] 修复变体(首编译不计预算): picked=${out.replicaFix.picked} broke=${out.replicaFix.broke} ` +
+    out.replicaFix.steps.map((x) => `批${x.size}${x.cut ? '截断' : `:min ${x.minMs}ms t=${x.t}`}`).join(' | '), 'hl');
+
+  /* ground truth:细测(warmup 8 × 50 iters) */
+  const gt = {};
+  for (const size of [1, 2, 4, 8, 16, 32]) {
+    const rows = mk(size);
+    for (let i = 0; i < 8; i++) await s.evalBatch(rows);
+    const times = [];
+    for (let i = 0; i < 50; i++) { const t0 = now(); await s.evalBatch(rows); times.push(now() - t0); }
+    const st = stats(times);
+    gt[size] = { minMs: +st.min.toFixed(2), p50Ms: +st.p50.toFixed(2), tMin: +(size * 1000 / st.min).toFixed(1), tP50: +(size * 1000 / st.p50).toFixed(1) };
+  }
+  const gtEntries = [2, 4, 8, 16, 32].map((n) => [n, gt[n].tMin]);
+  out.ground = { sizes: gt, expectedPickMin: pickBatchSizeFromThroughput(gtEntries), expectedPickP50: pickBatchSizeFromThroughput([2, 4, 8, 16, 32].map((n) => [n, gt[n].tP50])) };
+  log(`[${b.id}] ground-truth: ` + [1, 2, 4, 8, 16, 32].map((n) => `批${n}=${gt[n].tMin}行/s(min)/${gt[n].tP50}(p50)`).join(' ') +
+    ` → 应得(min口径)=${out.ground.expectedPickMin} (p50口径)=${out.ground.expectedPickP50}`, 'hl');
+
+  for (let r = 0; r < 3; r++) {
+    const t0 = now();
+    const picked = await calibrateMaxBatch((rows) => s.evalBatch(rows));
+    out.direct.push({ picked, wallS: +((now() - t0) / 1000).toFixed(2) });
+    log(`[${b.id}] 真·calibrateMaxBatch #${r + 1}(热态): ${picked}(${out.direct[r].wallS}s)`, 'hl');
+  }
+  await s.dispose?.();
+  return out;
+}
+
+/* ---------------- 1024v 吞吐(?vbench=1,对齐 KataGo benchmark 口径) ----------------
+ * 3 个局面(空盘/中盘/官子),每局全新搜索(reuseTree:false,同 KataGo 每位置
+ * 独立搜索),visits=1024,maxBatch ∈ {8,16,32,64} 对应 KataGo numSearchThreads。 */
+const VB_POS = (() => {
+  const seqs = [
+    [],
+    [[3,3],[15,15],[3,15],[15,3],[9,9],[3,9],[15,9],[9,3],[9,15],[5,5],[13,13],[5,13],[13,5],[7,7],[11,11],[7,11],[11,7],[2,8],[16,8],[8,2],[8,16],[6,6],[12,12],[6,12],[12,6],[4,4],[14,14]],
+    [[0,0],[0,1],[18,18],[18,17],[1,1],[17,17],[9,9],[9,10],[10,9],[10,10],[2,2],[16,16],[3,15],[15,3],[4,4],[14,14],[5,13],[13,5],[6,12],[12,6],[7,11],[11,7],[8,10],[10,8],[9,9],[2,16],[16,2],[3,3],[15,15],[4,14]],
+  ];
+  return seqs.map((sq) => {
+    const bd = newBoard();
+    const moves = [];
+    sq.forEach(([r, c], i) => { const mv = r * N + c; moves.push(mv); make(bd, mv, i % 2 === 0 ? BLACK : WHITE); });
+    return { bd, side: sq.length % 2 === 0 ? BLACK : WHITE, moves };
+  });
+})();
+
+async function vbenchOne(b) {
+  const s = await b.mk({ onStatus: (t) => log(`[${b.id}]   ${t}`) });
+  const out = { ep: s.ep };
+  for (const mb of [8, 16, 32, 64]) {
+    const perS = [];
+    for (const { bd, side, moves } of VB_POS) {
+      const t0 = performance.now();
+      await b.search(bd, side, { session: s, visits: 1024, maxBatch: mb, reuseTree: false, recentMoves: moves.slice() });
+      perS.push((performance.now() - t0) / 1000);
+    }
+    const visitsPerSec = +(1024 * perS.length / perS.reduce((a, c) => a + c, 0)).toFixed(1);
+    out[mb] = { perS: perS.map((x) => +x.toFixed(2)), visitsPerSec };
+    log(`[${b.id}] 1024v maxBatch=${mb}: ${visitsPerSec} visits/s (${perS.map((x) => x.toFixed(2) + 's').join(', ')})`, 'hl');
+  }
+  await s.dispose?.();
+  return out;
+}
+
+/* ---------------- 主流程 ---------------- */
+async function main() {
+  log(`UA: ${navigator.userAgent}`);
+  const ad = await navigator.gpu.requestAdapter();
+  if (!ad) throw new Error('无 WebGPU adapter');
+  let info = {};
+  try {
+    const i = ad.info ?? (ad.requestAdapterInfo ? await ad.requestAdapterInfo() : {});
+    info = { vendor: i.vendor || '-', architecture: i.architecture || '-', device: i.device || '-', description: i.description || '-' };
+  } catch (e) { info = { readError: String(e) }; }
+  state.webgpu = { ...info, f16: ad.features?.has('shader-f16') };
+  log(`WebGPU: 可用(f16=${state.webgpu.f16}, vendor=${info.vendor}, arch=${info.architecture}, device=${info.device}, desc=${info.description})`, 'hl');
+
+  if (VBENCH) {
+    state.phase = 'vbench';
+    state.vbench = {};
+    for (const b of BACKENDS) {
+      state.vbench[b.id] = await vbenchOne(b);
+      await log(`vbench 完成: ${b.id}`, 'hl');
+    }
+    state.phase = 'vbench-done';
+    await log('VBENCH DONE', 'hl');
+    return;
+  }
+
+  if (CALIB_PROBE) {
+    state.phase = 'calib';
+    state.calib = {};
+    for (const b of BACKENDS) {
+      state.calib[b.id] = await calibProbe(b);
+      await log(`calib 完成: ${b.id}`, 'hl');
+    }
+    state.phase = 'calib-done';
+    await log('CALIB DONE(?calib=1 不对战)', 'hl');
+    return;
+  }
+
+  if (SWEEP_ONLY) {
+    state.phase = 'sweep';
+    for (const b of BACKENDS) {
+      state.sweep = state.sweep ?? {};
+      state.sweep[b.id] = await sweepOne(b);
+      await log(`sweep 完成: ${b.id}`, 'hl');
+    }
+    state.phase = 'sweep-done';
+    await log('SWEEP DONE(?sweep=1 不对战)', 'hl');
+    return;
+  }
+
+  state.phase = 'bench';
+  for (const b of BACKENDS) {
+    state.bench[b.id] = await benchOne(b);
+    await log(`bench 完成: ${b.id}`, 'hl');
+  }
+  if (BENCH_ONLY) {
+    state.phase = 'bench-done';
+    await log('BENCH DONE(?bench=1 不对战)', 'hl');
+    return;
+  }
+
+  state.phase = 'match';
+  const tally = {};
+  for (const [ai, bi] of PAIRS) {
+    const bA = BACKENDS[ai], bB = BACKENDS[bi];
+    const pairName = `${bA.id}-vs-${bB.id}`;
+    log(`=== 对战 ${bA.id} vs ${bB.id}(2 局)===`, 'hl');
+    bA.session = await bA.mk({ onStatus: (t) => log(`[${bA.id}]   ${t}`) });
+    bB.session = await bB.mk({ onStatus: (t) => log(`[${bB.id}]   ${t}`) });
+    tally[pairName] = { a: bA.id, b: bB.id, aWins: 0, games: 0 };
+    for (let g = 0; g < 2; g++) {
+      const aBlack = g === 0;
+      const t0 = Date.now();
+      const seed = (987654321 ^ (ai * 2654435761) ^ (bi * 40503) ^ (g * 9176)) >>> 0;
+      const r = await playGame(bA, bB, aBlack, seed, pairName, g);
+      r.wallS = +((Date.now() - t0) / 1000).toFixed(1);
+      state.games.push(r);
+      tally[pairName].games++;
+      if (r.aWon) tally[pairName].aWins++;
+      log(`局${g + 1}: ${r.aBlack ? bA.id : bB.id} 执黑 → 胜者 ${r.winner}(${r.how},${r.plies} 手,${r.wallS}s,均耗时/手 ${r.msPerMove.A}ms(A:${bA.id}) vs ${r.msPerMove.B}ms(B:${bB.id}))`, 'hl');
+      await log(`game 完成: ${pairName} #${g + 1}`, 'hl');
+    }
+    await bA.session.dispose?.(); await bB.session.dispose?.();
+    bA.session = bB.session = null;
+  }
+
+  state.phase = 'done';
+  state.summary = { tally, totalGames: state.games.length, finishedAt: new Date().toISOString() };
+  log('全部完成:' + JSON.stringify(tally), 'hl');
+  await log('ALL DONE', 'hl');
+}
+
+main().catch((e) => {
+  state.phase = 'error';
+  state.error = String(e && (e.stack || e) || e);
+  log(`FATAL: ${state.error}`, 'err');
+  fetch('/report', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(state) }).catch(() => {});
+});
+</script>
+</body>
+</html>

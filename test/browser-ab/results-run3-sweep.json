@@ -1,0 +1,250 @@
+{
+  "phase": "sweep-done",
+  "startedAt": "2026-10-07T08:23:54.016Z",
+  "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) ZCode/3.14.4 Chrome/146.0.7680.80 Electron/41.0.3 Safari/537.36",
+  "webgpu": {
+    "vendor": "nvidia",
+    "architecture": "blackwell",
+    "device": "-",
+    "description": "-",
+    "f16": true
+  },
+  "events": [
+    {
+      "t": 1791361434017,
+      "text": "[08:23:54] UA: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) ZCode/3.14.4 Chrome/146.0.7680.80 Electron/41.0.3 Safari/537.36"
+    },
+    {
+      "t": 1791361434131,
+      "text": "[08:23:54] WebGPU: 可用(f16=true, vendor=nvidia, arch=blackwell, device=-, desc=-)"
+    },
+    {
+      "t": 1791361434132,
+      "text": "[08:23:54] [onnx] 加载会话(calibrate off)…"
+    },
+    {
+      "t": 1791361434172,
+      "text": "[08:23:54] [onnx]   加载 onnxruntime-web"
+    },
+    {
+      "t": 1791361434172,
+      "text": "[08:23:54] [onnx]   创建 WebGPU 会话"
+    },
+    {
+      "t": 1791361434511,
+      "text": "[08:23:54] [onnx]   模型就绪(WebGPU)"
+    },
+    {
+      "t": 1791361435629,
+      "text": "[08:23:55] [onnx] 批1: p50 24.50ms → 40.8 行/s(min 10.10ms → 99)"
+    },
+    {
+      "t": 1791361436681,
+      "text": "[08:23:56] [onnx] 批2: p50 23.40ms → 85.5 行/s(min 9.50ms → 210.5)"
+    },
+    {
+      "t": 1791361437693,
+      "text": "[08:23:57] [onnx] 批4: p50 22.40ms → 178.6 行/s(min 9.10ms → 439.6)"
+    },
+    {
+      "t": 1791361438671,
+      "text": "[08:23:58] [onnx] 批8: p50 21.60ms → 370.4 行/s(min 12.70ms → 629.9)"
+    },
+    {
+      "t": 1791361440008,
+      "text": "[08:24:00] [onnx] 批16: p50 27.20ms → 588.2 行/s(min 18.80ms → 851.1)"
+    },
+    {
+      "t": 1791361440011,
+      "text": "[08:24:00] sweep 完成: onnx"
+    },
+    {
+      "t": 1791361440015,
+      "text": "[08:24:00] [f32] 加载会话(calibrate off)…"
+    },
+    {
+      "t": 1791361440025,
+      "text": "[08:24:00] [f32]   请求 WebGPU 设备"
+    },
+    {
+      "t": 1791361440063,
+      "text": "[08:24:00] [f32]   加载权重 blob"
+    },
+    {
+      "t": 1791361440080,
+      "text": "[08:24:00] [f32]   权重:fp32 版"
+    },
+    {
+      "t": 1791361440411,
+      "text": "[08:24:00] [f32] 批1: p50 6.50ms → 153.8 行/s(min 5.90ms → 169.5)"
+    },
+    {
+      "t": 1791361440859,
+      "text": "[08:24:00] [f32] 批2: p50 9.70ms → 206.2 行/s(min 9.20ms → 217.4)"
+    },
+    {
+      "t": 1791361441471,
+      "text": "[08:24:01] [f32] 批4: p50 13.50ms → 296.3 行/s(min 12.40ms → 322.6)"
+    },
+    {
+      "t": 1791361442595,
+      "text": "[08:24:02] [f32] 批8: p50 24.90ms → 321.3 行/s(min 23.90ms → 334.7)"
+    },
+    {
+      "t": 1791361444658,
+      "text": "[08:24:04] [f32] 批16: p50 45.80ms → 349.3 行/s(min 44.30ms → 361.2)"
+    },
+    {
+      "t": 1791361444659,
+      "text": "[08:24:04] sweep 完成: f32"
+    },
+    {
+      "t": 1791361444687,
+      "text": "[08:24:04] [i8] 加载会话(calibrate off)…"
+    },
+    {
+      "t": 1791361444688,
+      "text": "[08:24:04] [i8]   请求 WebGPU 设备"
+    },
+    {
+      "t": 1791361444728,
+      "text": "[08:24:04] [i8]   加载权重 blob"
+    },
+    {
+      "t": 1791361444736,
+      "text": "[08:24:04] [i8]   权重:int8 量化版(W8A16 + f16 激活)"
+    },
+    {
+      "t": 1791361445002,
+      "text": "[08:24:05] [i8] 批1: p50 5.20ms → 192.3 行/s(min 4.60ms → 217.4)"
+    },
+    {
+      "t": 1791361445320,
+      "text": "[08:24:05] [i8] 批2: p50 7.00ms → 285.7 行/s(min 6.20ms → 322.6)"
+    },
+    {
+      "t": 1791361445759,
+      "text": "[08:24:05] [i8] 批4: p50 9.70ms → 412.4 行/s(min 8.80ms → 454.5)"
+    },
+    {
+      "t": 1791361446586,
+      "text": "[08:24:06] [i8] 批8: p50 18.30ms → 437.2 行/s(min 17.00ms → 470.6)"
+    },
+    {
+      "t": 1791361448087,
+      "text": "[08:24:08] [i8] 批16: p50 33.30ms → 480.5 行/s(min 31.70ms → 504.7)"
+    },
+    {
+      "t": 1791361448088,
+      "text": "[08:24:08] sweep 完成: i8"
+    },
+    {
+      "t": 1791361448094,
+      "text": "[08:24:08] SWEEP DONE(?sweep=1 不对战)"
+    }
+  ],
+  "bench": {},
+  "games": [],
+  "summary": null,
+  "sweep": {
+    "onnx": {
+      "1": {
+        "minMs": 10.1,
+        "p50Ms": 24.5,
+        "rowsPerSecMin": 99,
+        "rowsPerSecP50": 40.8
+      },
+      "2": {
+        "minMs": 9.5,
+        "p50Ms": 23.4,
+        "rowsPerSecMin": 210.5,
+        "rowsPerSecP50": 85.5
+      },
+      "4": {
+        "minMs": 9.1,
+        "p50Ms": 22.4,
+        "rowsPerSecMin": 439.6,
+        "rowsPerSecP50": 178.6
+      },
+      "8": {
+        "minMs": 12.7,
+        "p50Ms": 21.6,
+        "rowsPerSecMin": 629.9,
+        "rowsPerSecP50": 370.4
+      },
+      "16": {
+        "minMs": 18.8,
+        "p50Ms": 27.2,
+        "rowsPerSecMin": 851.1,
+        "rowsPerSecP50": 588.2
+      },
+      "ep": "webgpu"
+    },
+    "f32": {
+      "1": {
+        "minMs": 5.9,
+        "p50Ms": 6.5,
+        "rowsPerSecMin": 169.5,
+        "rowsPerSecP50": 153.8
+      },
+      "2": {
+        "minMs": 9.2,
+        "p50Ms": 9.7,
+        "rowsPerSecMin": 217.4,
+        "rowsPerSecP50": 206.2
+      },
+      "4": {
+        "minMs": 12.4,
+        "p50Ms": 13.5,
+        "rowsPerSecMin": 322.6,
+        "rowsPerSecP50": 296.3
+      },
+      "8": {
+        "minMs": 23.9,
+        "p50Ms": 24.9,
+        "rowsPerSecMin": 334.7,
+        "rowsPerSecP50": 321.3
+      },
+      "16": {
+        "minMs": 44.3,
+        "p50Ms": 45.8,
+        "rowsPerSecMin": 361.2,
+        "rowsPerSecP50": 349.3
+      },
+      "ep": "webgpu-aewnn"
+    },
+    "i8": {
+      "1": {
+        "minMs": 4.6,
+        "p50Ms": 5.2,
+        "rowsPerSecMin": 217.4,
+        "rowsPerSecP50": 192.3
+      },
+      "2": {
+        "minMs": 6.2,
+        "p50Ms": 7,
+        "rowsPerSecMin": 322.6,
+        "rowsPerSecP50": 285.7
+      },
+      "4": {
+        "minMs": 8.8,
+        "p50Ms": 9.7,
+        "rowsPerSecMin": 454.5,
+        "rowsPerSecP50": 412.4
+      },
+      "8": {
+        "minMs": 17,
+        "p50Ms": 18.3,
+        "rowsPerSecMin": 470.6,
+        "rowsPerSecP50": 437.2
+      },
+      "16": {
+        "minMs": 31.7,
+        "p50Ms": 33.3,
+        "rowsPerSecMin": 504.7,
+        "rowsPerSecP50": 480.5
+      },
+      "ep": "webgpu-aewnn"
+    }
+  }
+}

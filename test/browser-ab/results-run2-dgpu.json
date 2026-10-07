@@ -1,0 +1,207 @@
+{
+  "phase": "bench-done",
+  "startedAt": "2026-10-07T08:21:15.858Z",
+  "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) ZCode/3.14.4 Chrome/146.0.7680.80 Electron/41.0.3 Safari/537.36",
+  "webgpu": {
+    "vendor": "nvidia",
+    "architecture": "blackwell",
+    "device": "-",
+    "description": "-",
+    "f16": true
+  },
+  "events": [
+    {
+      "t": 1791361275859,
+      "text": "[08:21:15] UA: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) ZCode/3.14.4 Chrome/146.0.7680.80 Electron/41.0.3 Safari/537.36"
+    },
+    {
+      "t": 1791361276003,
+      "text": "[08:21:16] WebGPU: 可用(f16=true, vendor=nvidia, arch=blackwell, device=-, desc=-)"
+    },
+    {
+      "t": 1791361276004,
+      "text": "[08:21:16] [onnx] 加载会话…"
+    },
+    {
+      "t": 1791361276057,
+      "text": "[08:21:16] [onnx]   加载 onnxruntime-web"
+    },
+    {
+      "t": 1791361276057,
+      "text": "[08:21:16] [onnx]   创建 WebGPU 会话"
+    },
+    {
+      "t": 1791361276604,
+      "text": "[08:21:16] [onnx]   模型就绪(WebGPU)"
+    },
+    {
+      "t": 1791361276605,
+      "text": "[08:21:16] [onnx]   校准批次大小"
+    },
+    {
+      "t": 1791361278375,
+      "text": "[08:21:18] [onnx]   校准完成(批上限 2)"
+    },
+    {
+      "t": 1791361278376,
+      "text": "[08:21:18] [onnx] 会话就绪(webgpu,校准批上限 2),加载 2.4s"
+    },
+    {
+      "t": 1791361280165,
+      "text": "[08:21:20] [onnx] 批4 evalBatch:min 18.40ms / p50 24.50ms / mean 25.00ms → 163.3 行/s(p50)"
+    },
+    {
+      "t": 1791361281486,
+      "text": "[08:21:21] [onnx] 64v 搜索(空盘×3):p50 436ms / min 405ms"
+    },
+    {
+      "t": 1791361281490,
+      "text": "[08:21:21] bench 完成: onnx"
+    },
+    {
+      "t": 1791361281516,
+      "text": "[08:21:21] [f32] 加载会话…"
+    },
+    {
+      "t": 1791361281550,
+      "text": "[08:21:21] [f32]   请求 WebGPU 设备"
+    },
+    {
+      "t": 1791361281592,
+      "text": "[08:21:21] [f32]   加载权重 blob"
+    },
+    {
+      "t": 1791361281614,
+      "text": "[08:21:21] [f32]   权重:fp32 版"
+    },
+    {
+      "t": 1791361281620,
+      "text": "[08:21:21] [f32]   校准批次大小"
+    },
+    {
+      "t": 1791361283791,
+      "text": "[08:21:23] [f32]   校准完成(批上限 8)"
+    },
+    {
+      "t": 1791361283791,
+      "text": "[08:21:23] [f32] 会话就绪(webgpu-aewnn,校准批上限 8),加载 2.3s"
+    },
+    {
+      "t": 1791361284739,
+      "text": "[08:21:24] [f32] 批4 evalBatch:min 12.70ms / p50 13.40ms / mean 13.58ms → 298.5 行/s(p50)"
+    },
+    {
+      "t": 1791361285454,
+      "text": "[08:21:25] [f32] 64v 搜索(空盘×3):p50 242ms / min 228ms"
+    },
+    {
+      "t": 1791361285455,
+      "text": "[08:21:25] bench 完成: f32"
+    },
+    {
+      "t": 1791361285479,
+      "text": "[08:21:25] [i8] 加载会话…"
+    },
+    {
+      "t": 1791361285481,
+      "text": "[08:21:25] [i8]   请求 WebGPU 设备"
+    },
+    {
+      "t": 1791361285532,
+      "text": "[08:21:25] [i8]   加载权重 blob"
+    },
+    {
+      "t": 1791361285541,
+      "text": "[08:21:25] [i8]   权重:int8 量化版(W8A16 + f16 激活)"
+    },
+    {
+      "t": 1791361285545,
+      "text": "[08:21:25] [i8]   校准批次大小"
+    },
+    {
+      "t": 1791361287298,
+      "text": "[08:21:27] [i8]   校准完成(批上限 16)"
+    },
+    {
+      "t": 1791361287299,
+      "text": "[08:21:27] [i8] 会话就绪(webgpu-aewnn,校准批上限 16),加载 1.8s"
+    },
+    {
+      "t": 1791361288025,
+      "text": "[08:21:28] [i8] 批4 evalBatch:min 8.90ms / p50 10.10ms / mean 10.15ms → 396 行/s(p50)"
+    },
+    {
+      "t": 1791361288577,
+      "text": "[08:21:28] [i8] 64v 搜索(空盘×3):p50 184ms / min 170ms"
+    },
+    {
+      "t": 1791361288578,
+      "text": "[08:21:28] bench 完成: i8"
+    },
+    {
+      "t": 1791361288583,
+      "text": "[08:21:28] BENCH DONE(?bench=1 不对战)"
+    }
+  ],
+  "bench": {
+    "onnx": {
+      "ep": "webgpu",
+      "calibratedMaxBatch": 2,
+      "loadS": 2.37,
+      "batch4": {
+        "minMs": 18.4,
+        "p50Ms": 24.5,
+        "meanMs": 25,
+        "rowsPerSecMin": 217.4,
+        "rowsPerSecP50": 163.3,
+        "rowsPerSecMean": 160
+      },
+      "search64v": {
+        "n": 3,
+        "min": 405.4,
+        "p50": 436.1,
+        "mean": 440.06666666666666
+      }
+    },
+    "f32": {
+      "ep": "webgpu-aewnn",
+      "calibratedMaxBatch": 8,
+      "loadS": 2.27,
+      "batch4": {
+        "minMs": 12.7,
+        "p50Ms": 13.4,
+        "meanMs": 13.58,
+        "rowsPerSecMin": 315,
+        "rowsPerSecP50": 298.5,
+        "rowsPerSecMean": 294.6
+      },
+      "search64v": {
+        "n": 3,
+        "min": 228.1,
+        "p50": 241.7,
+        "mean": 237.89999999999998
+      }
+    },
+    "i8": {
+      "ep": "webgpu-aewnn",
+      "calibratedMaxBatch": 16,
+      "loadS": 1.82,
+      "batch4": {
+        "minMs": 8.9,
+        "p50Ms": 10.1,
+        "meanMs": 10.15,
+        "rowsPerSecMin": 449.4,
+        "rowsPerSecP50": 396,
+        "rowsPerSecMean": 393.9
+      },
+      "search64v": {
+        "n": 3,
+        "min": 169.5,
+        "p50": 183.9,
+        "mean": 183.69999999999996
+      }
+    }
+  },
+  "games": [],
+  "summary": null
+}

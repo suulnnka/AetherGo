@@ -1,0 +1,38 @@
+{
+  "phase": "saigo-bench2",
+  "startedAt": "2026-10-07T11:48:53.515Z",
+  "coi": true,
+  "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36 Edg/154.0.0.0",
+  "rows": [
+    {
+      "pos": "空盘",
+      "minMs": 87.88,
+      "p50Ms": 118.98,
+      "evalsPerSec": 8.4
+    },
+    {
+      "pos": "中盘27手",
+      "minMs": 86.96,
+      "p50Ms": 94.36,
+      "evalsPerSec": 10.6
+    },
+    {
+      "pos": "官子30手",
+      "minMs": 86.6,
+      "p50Ms": 95.16,
+      "evalsPerSec": 10.5
+    }
+  ],
+  "finishedAt": "2026-10-07T11:49:04.236Z",
+  "log": [
+    "[11:48:53] COI=true GPU=true cores=16",
+    "[11:48:53] net 7.2MB 已载入",
+    "[11:48:53] init(KataGoNet 加载网络)…",
+    "[11:48:53] 引擎就绪: saigo · saigo-format (v17, 5 blocks x 192 ch, 1889833 params)  visitCap=24  93ms",
+    "[11:48:53] genMove 冒烟: top=(2,2) win黑=0.9%",
+    "[11:48:57] 空盘: 单次前向 min 87.9ms / p50 119.0ms → 8 evals/s",
+    "[11:49:00] 中盘27手: 单次前向 min 87.0ms / p50 94.4ms → 11 evals/s",
+    "[11:49:04] 官子30手: 单次前向 min 86.6ms / p50 95.2ms → 11 evals/s",
+    "[11:49:04] BENCH DONE"
+  ]
+}
