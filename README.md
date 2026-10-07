@@ -311,4 +311,14 @@ NN 路线的金标准是**特征对拍**(`test/featdiff.mjs`):katago selfplay �
 
 ## License
 
-MIT
+本仓库自有代码:MIT(全文见 [LICENSE](LICENSE))。
+
+第三方许可(全文均附于仓库根目录):
+
+- [`LICENSE_katago`](LICENSE_katago) — [KataGo](https://github.com/lightvector/KataGo)(MIT)。
+  搜索机制 / GTP 配方 / 特征编码 / 训练管线对齐与对拍的上游;内置模型
+  `models/b8c96h3tfrs_19.*` 经官方 kata1 公开训练数据冷启动自训(kata1 网络为 MIT 系
+  [KataGo Neural Network License](https://katagotraining.org/network_license/),数据可自由下载)。
+- [`LICENSE_katago-webgpu`](LICENSE_katago-webgpu) — [katago-webgpu](https://github.com/saigo-online/katago-webgpu)(MIT,继承 KataGo)。
+  `src/nn/webgpu/kernels.js` 部分内核结构(tiledGemm 家族 / flashAttention / rmsNorm)移植自其
+  `webgpukernels.cpp`,文件头注有逐项出处。

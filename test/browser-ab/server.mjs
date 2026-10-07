@@ -48,7 +48,7 @@ createServer(async (req, res) => {
     const file = join(ROOT, p || 'index.html');
     if (!file.startsWith(ROOT)) { res.writeHead(403); res.end(); return; }
     const data = await readFile(file);
-    /* COOP/COEP:saigo-bench 之类线程化 WASM 页需要 cross-origin isolation */
+    /* COOP/COEP:线程化 WASM 后端(如 ort-web 多线程)需要 cross-origin isolation */
     res.writeHead(200, {
       'Content-Type': MIME[extname(file).toLowerCase()] ?? 'application/octet-stream',
       'Cross-Origin-Opener-Policy': 'same-origin',

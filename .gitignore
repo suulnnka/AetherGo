@@ -40,8 +40,3 @@ Thumbs.db
 models/b8c96h3tfrs_19.f16.aewn
 # 本机差分手册,含机器路径等私有信息,不入库(本地保留)
 docs/DIFF_WORKFLOW.md
-# saigo.online 第三方引擎资产(调查用镜像,不入库:net 7.3MB + wasm,可按
-# test/browser-ab/saigo-proxy.mjs 头注从站点重新拉取)
-test/browser-ab/saigo-assets/saigo-net.bin
-test/browser-ab/saigo-assets/workers/assets/
-test/browser-ab/saigo-assets/*.txt

@@ -1,38 +1,706 @@
 {
-  "phase": "saigo-bench2",
-  "startedAt": "2026-10-07T11:48:53.515Z",
-  "coi": true,
-  "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36 Edg/154.0.0.0",
-  "rows": [
+  "phase": "calib-done",
+  "startedAt": "2026-10-07T16:28:42.730Z",
+  "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) ZCode/3.14.4 Chrome/146.0.7680.80 Electron/41.0.3 Safari/537.36",
+  "webgpu": {
+    "vendor": "nvidia",
+    "architecture": "blackwell",
+    "device": "-",
+    "description": "-",
+    "f16": true
+  },
+  "events": [
     {
-      "pos": "空盘",
-      "minMs": 87.88,
-      "p50Ms": 118.98,
-      "evalsPerSec": 8.4
+      "t": 1791390522732,
+      "text": "[16:28:42] UA: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) ZCode/3.14.4 Chrome/146.0.7680.80 Electron/41.0.3 Safari/537.36"
     },
     {
-      "pos": "中盘27手",
-      "minMs": 86.96,
-      "p50Ms": 94.36,
-      "evalsPerSec": 10.6
+      "t": 1791390522864,
+      "text": "[16:28:42] WebGPU: 可用(f16=true, vendor=nvidia, arch=blackwell, device=-, desc=-)"
     },
     {
-      "pos": "官子30手",
-      "minMs": 86.6,
-      "p50Ms": 95.16,
-      "evalsPerSec": 10.5
+      "t": 1791390522930,
+      "text": "[16:28:42] [onnx]   加载 onnxruntime-web"
+    },
+    {
+      "t": 1791390522930,
+      "text": "[16:28:42] [onnx]   创建 WebGPU 会话"
+    },
+    {
+      "t": 1791390523641,
+      "text": "[16:28:43] [onnx]   模型就绪(WebGPU)"
+    },
+    {
+      "t": 1791390525129,
+      "text": "[16:28:45] [onnx] 复刻(产品条件): picked=16 broke=false 批2:warm 105.8ms min 27.6ms t=0.1 ×6 | 批4:warm 34.8ms min 24.5ms t=0.2 ×6 | 批8:warm 33.5ms min 28.1ms t=0.3 ×6 | 批16:warm 49.9ms min 16.8ms t=1 ×6 | 批32:warm 81.9ms min 71.9ms t=0.4 ×6"
+    },
+    {
+      "t": 1791390526311,
+      "text": "[16:28:46] [onnx] 修复变体(首编译不计预算): picked=8 broke=false 批2:min 11.7ms t=0.2 | 批4:min 13.3ms t=0.3 | 批8:min 13.8ms t=0.6 | 批16:min 24.9ms t=0.6 | 批32:min 66.9ms t=0.5"
+    },
+    {
+      "t": 1791390538061,
+      "text": "[16:28:58] [onnx] ground-truth: 批1=84行/s(min)/42.4(p50) 批2=143.9行/s(min)/75.2(p50) 批4=330.6行/s(min)/154.4(p50) 批8=583.9行/s(min)/307.7(p50) 批16=808.1行/s(min)/588.2(p50) 批32=478.3行/s(min)/421.1(p50) → 应得(min口径)=16 (p50口径)=16"
+    },
+    {
+      "t": 1791390540277,
+      "text": "[16:29:00] [onnx] 真·calibrateMaxBatch #1(热态): 16(2.21s)"
+    },
+    {
+      "t": 1791390542507,
+      "text": "[16:29:02] [onnx] 真·calibrateMaxBatch #2(热态): 16(2.23s)"
+    },
+    {
+      "t": 1791390544830,
+      "text": "[16:29:04] [onnx] 真·calibrateMaxBatch #3(热态): 8(2.32s)"
+    },
+    {
+      "t": 1791390544838,
+      "text": "[16:29:04] calib 完成: onnx"
+    },
+    {
+      "t": 1791390544857,
+      "text": "[16:29:04] [f32]   请求 WebGPU 设备"
+    },
+    {
+      "t": 1791390544901,
+      "text": "[16:29:04] [f32]   加载权重 blob"
+    },
+    {
+      "t": 1791390544918,
+      "text": "[16:29:04] [f32]   权重:fp32 版"
+    },
+    {
+      "t": 1791390545459,
+      "text": "[16:29:05] [f32] 复刻(产品条件): picked=8 broke=false 批2:warm 37.1ms min 4.3ms t=0.5 ×6 | 批4:warm 6.4ms min 5.8ms t=0.7 ×6 | 批8:warm 8.6ms min 8.6ms t=0.9 ×6 | 批16:warm 17.2ms min 16.6ms t=1 ×6 | 批32:warm 32.6ms min 31.2ms t=1 ×6"
+    },
+    {
+      "t": 1791390546043,
+      "text": "[16:29:06] [f32] 修复变体(首编译不计预算): picked=8 broke=false 批2:min 4.6ms t=0.4 | 批4:min 6.2ms t=0.6 | 批8:min 8.6ms t=0.9 | 批16:min 17.3ms t=0.9 | 批32:min 35.4ms t=0.9"
+    },
+    {
+      "t": 1791390550696,
+      "text": "[16:29:10] [f32] ground-truth: 批1=285.7行/s(min)/238.1(p50) 批2=487.8行/s(min)/408.2(p50) 批4=666.7行/s(min)/579.7(p50) 批8=860.2行/s(min)/800(p50) 批16=969.7行/s(min)/884(p50) 批32=1012.7行/s(min)/935.7(p50) → 应得(min口径)=16 (p50口径)=16"
+    },
+    {
+      "t": 1791390551676,
+      "text": "[16:29:11] [f32] 真·calibrateMaxBatch #1(热态): 16(0.98s)"
+    },
+    {
+      "t": 1791390552656,
+      "text": "[16:29:12] [f32] 真·calibrateMaxBatch #2(热态): 16(0.98s)"
+    },
+    {
+      "t": 1791390553642,
+      "text": "[16:29:13] [f32] 真·calibrateMaxBatch #3(热态): 16(0.99s)"
+    },
+    {
+      "t": 1791390553643,
+      "text": "[16:29:13] calib 完成: f32"
+    },
+    {
+      "t": 1791390553650,
+      "text": "[16:29:13] [i8]   请求 WebGPU 设备"
+    },
+    {
+      "t": 1791390553701,
+      "text": "[16:29:13] [i8]   加载权重 blob"
+    },
+    {
+      "t": 1791390553710,
+      "text": "[16:29:13] [i8]   权重:int8 量化版(W8A16 + f16 激活)"
+    },
+    {
+      "t": 1791390554254,
+      "text": "[16:29:14] [i8] 复刻(产品条件): picked=8 broke=false 批2:warm 34.4ms min 4.7ms t=0.4 ×6 | 批4:warm 7.8ms min 6ms t=0.7 ×6 | 批8:warm 9ms min 8.4ms t=1 ×6 | 批16:warm 17.1ms min 16.4ms t=1 ×6 | 批32:warm 31.2ms min 31.3ms t=1 ×6"
+    },
+    {
+      "t": 1791390554819,
+      "text": "[16:29:14] [i8] 修复变体(首编译不计预算): picked=8 broke=false 批2:min 4.9ms t=0.4 | 批4:min 6.2ms t=0.6 | 批8:min 9ms t=0.9 | 批16:min 17.2ms t=0.9 | 批32:min 34ms t=0.9"
+    },
+    {
+      "t": 1791390559418,
+      "text": "[16:29:19] [i8] ground-truth: 批1=303行/s(min)/227.3(p50) 批2=444.4行/s(min)/363.6(p50) 批4=655.7行/s(min)/563.4(p50) 批8=879.1行/s(min)/808.1(p50) 批16=969.7行/s(min)/898.9(p50) 批32=1012.7行/s(min)/949.6(p50) → 应得(min口径)=16 (p50口径)=16"
+    },
+    {
+      "t": 1791390560381,
+      "text": "[16:29:20] [i8] 真·calibrateMaxBatch #1(热态): 16(0.96s)"
+    },
+    {
+      "t": 1791390561351,
+      "text": "[16:29:21] [i8] 真·calibrateMaxBatch #2(热态): 16(0.97s)"
+    },
+    {
+      "t": 1791390562327,
+      "text": "[16:29:22] [i8] 真·calibrateMaxBatch #3(热态): 16(0.98s)"
+    },
+    {
+      "t": 1791390562328,
+      "text": "[16:29:22] calib 完成: i8"
+    },
+    {
+      "t": 1791390562335,
+      "text": "[16:29:22] CALIB DONE(?calib=1 不对战)"
     }
   ],
-  "finishedAt": "2026-10-07T11:49:04.236Z",
-  "log": [
-    "[11:48:53] COI=true GPU=true cores=16",
-    "[11:48:53] net 7.2MB 已载入",
-    "[11:48:53] init(KataGoNet 加载网络)…",
-    "[11:48:53] 引擎就绪: saigo · saigo-format (v17, 5 blocks x 192 ch, 1889833 params)  visitCap=24  93ms",
-    "[11:48:53] genMove 冒烟: top=(2,2) win黑=0.9%",
-    "[11:48:57] 空盘: 单次前向 min 87.9ms / p50 119.0ms → 8 evals/s",
-    "[11:49:00] 中盘27手: 单次前向 min 87.0ms / p50 94.4ms → 11 evals/s",
-    "[11:49:04] 官子30手: 单次前向 min 86.6ms / p50 95.2ms → 11 evals/s",
-    "[11:49:04] BENCH DONE"
-  ]
+  "bench": {},
+  "games": [],
+  "summary": null,
+  "calib": {
+    "onnx": {
+      "ep": "webgpu",
+      "replica": {
+        "entries": [
+          [
+            2,
+            0.07246376811202973
+          ],
+          [
+            4,
+            0.16326530612244897
+          ],
+          [
+            8,
+            0.2846975088816999
+          ],
+          [
+            16,
+            0.9523809523387156
+          ],
+          [
+            32,
+            0.4450625869124507
+          ]
+        ],
+        "picked": 16,
+        "steps": [
+          {
+            "size": 2,
+            "warmMs": 105.8,
+            "minMs": 27.6,
+            "t": 0.1,
+            "nIters": 6
+          },
+          {
+            "size": 4,
+            "warmMs": 34.8,
+            "minMs": 24.5,
+            "t": 0.2,
+            "nIters": 6
+          },
+          {
+            "size": 8,
+            "warmMs": 33.5,
+            "minMs": 28.1,
+            "t": 0.3,
+            "nIters": 6
+          },
+          {
+            "size": 16,
+            "warmMs": 49.9,
+            "minMs": 16.8,
+            "t": 1,
+            "nIters": 6
+          },
+          {
+            "size": 32,
+            "warmMs": 81.9,
+            "minMs": 71.9,
+            "t": 0.4,
+            "nIters": 6
+          }
+        ],
+        "broke": false
+      },
+      "replicaFix": {
+        "entries": [
+          [
+            2,
+            0.17094017095105643
+          ],
+          [
+            4,
+            0.3007518796824002
+          ],
+          [
+            8,
+            0.5797101448962378
+          ],
+          [
+            16,
+            0.642570281162952
+          ],
+          [
+            32,
+            0.4783258595024329
+          ]
+        ],
+        "picked": 8,
+        "steps": [
+          {
+            "size": 2,
+            "warmMs": 18.1,
+            "minMs": 11.7,
+            "t": 0.2,
+            "nIters": 6
+          },
+          {
+            "size": 4,
+            "warmMs": 14.1,
+            "minMs": 13.3,
+            "t": 0.3,
+            "nIters": 6
+          },
+          {
+            "size": 8,
+            "warmMs": 21,
+            "minMs": 13.8,
+            "t": 0.6,
+            "nIters": 6
+          },
+          {
+            "size": 16,
+            "warmMs": 30.8,
+            "minMs": 24.9,
+            "t": 0.6,
+            "nIters": 6
+          },
+          {
+            "size": 32,
+            "warmMs": 77.1,
+            "minMs": 66.9,
+            "t": 0.5,
+            "nIters": 6
+          }
+        ],
+        "broke": false
+      },
+      "ground": {
+        "sizes": {
+          "1": {
+            "minMs": 11.9,
+            "p50Ms": 23.6,
+            "tMin": 84,
+            "tP50": 42.4
+          },
+          "2": {
+            "minMs": 13.9,
+            "p50Ms": 26.6,
+            "tMin": 143.9,
+            "tP50": 75.2
+          },
+          "4": {
+            "minMs": 12.1,
+            "p50Ms": 25.9,
+            "tMin": 330.6,
+            "tP50": 154.4
+          },
+          "8": {
+            "minMs": 13.7,
+            "p50Ms": 26,
+            "tMin": 583.9,
+            "tP50": 307.7
+          },
+          "16": {
+            "minMs": 19.8,
+            "p50Ms": 27.2,
+            "tMin": 808.1,
+            "tP50": 588.2
+          },
+          "32": {
+            "minMs": 66.9,
+            "p50Ms": 76,
+            "tMin": 478.3,
+            "tP50": 421.1
+          }
+        },
+        "expectedPickMin": 16,
+        "expectedPickP50": 16
+      },
+      "direct": [
+        {
+          "picked": 16,
+          "wallS": 2.21
+        },
+        {
+          "picked": 16,
+          "wallS": 2.23
+        },
+        {
+          "picked": 8,
+          "wallS": 2.32
+        }
+      ]
+    },
+    "f32": {
+      "ep": "webgpu-aewnn",
+      "replica": {
+        "entries": [
+          [
+            2,
+            0.46511627898917707
+          ],
+          [
+            4,
+            0.6896551723252011
+          ],
+          [
+            8,
+            0.9302325579783541
+          ],
+          [
+            16,
+            0.9638554216002255
+          ],
+          [
+            32,
+            1.025641025665518
+          ]
+        ],
+        "picked": 8,
+        "steps": [
+          {
+            "size": 2,
+            "warmMs": 37.1,
+            "minMs": 4.3,
+            "t": 0.5,
+            "nIters": 6
+          },
+          {
+            "size": 4,
+            "warmMs": 6.4,
+            "minMs": 5.8,
+            "t": 0.7,
+            "nIters": 6
+          },
+          {
+            "size": 8,
+            "warmMs": 8.6,
+            "minMs": 8.6,
+            "t": 0.9,
+            "nIters": 6
+          },
+          {
+            "size": 16,
+            "warmMs": 17.2,
+            "minMs": 16.6,
+            "t": 1,
+            "nIters": 6
+          },
+          {
+            "size": 32,
+            "warmMs": 32.6,
+            "minMs": 31.2,
+            "t": 1,
+            "nIters": 6
+          }
+        ],
+        "broke": false
+      },
+      "replicaFix": {
+        "entries": [
+          [
+            2,
+            0.43478260855480944
+          ],
+          [
+            4,
+            0.64516129040011
+          ],
+          [
+            8,
+            0.930232558381306
+          ],
+          [
+            16,
+            0.9248554912896491
+          ],
+          [
+            32,
+            0.9039548022979378
+          ]
+        ],
+        "picked": 8,
+        "steps": [
+          {
+            "size": 2,
+            "warmMs": 5.5,
+            "minMs": 4.6,
+            "t": 0.4,
+            "nIters": 6
+          },
+          {
+            "size": 4,
+            "warmMs": 7.2,
+            "minMs": 6.2,
+            "t": 0.6,
+            "nIters": 6
+          },
+          {
+            "size": 8,
+            "warmMs": 9,
+            "minMs": 8.6,
+            "t": 0.9,
+            "nIters": 6
+          },
+          {
+            "size": 16,
+            "warmMs": 16.8,
+            "minMs": 17.3,
+            "t": 0.9,
+            "nIters": 6
+          },
+          {
+            "size": 32,
+            "warmMs": 35.6,
+            "minMs": 35.4,
+            "t": 0.9,
+            "nIters": 6
+          }
+        ],
+        "broke": false
+      },
+      "ground": {
+        "sizes": {
+          "1": {
+            "minMs": 3.5,
+            "p50Ms": 4.2,
+            "tMin": 285.7,
+            "tP50": 238.1
+          },
+          "2": {
+            "minMs": 4.1,
+            "p50Ms": 4.9,
+            "tMin": 487.8,
+            "tP50": 408.2
+          },
+          "4": {
+            "minMs": 6,
+            "p50Ms": 6.9,
+            "tMin": 666.7,
+            "tP50": 579.7
+          },
+          "8": {
+            "minMs": 9.3,
+            "p50Ms": 10,
+            "tMin": 860.2,
+            "tP50": 800
+          },
+          "16": {
+            "minMs": 16.5,
+            "p50Ms": 18.1,
+            "tMin": 969.7,
+            "tP50": 884
+          },
+          "32": {
+            "minMs": 31.6,
+            "p50Ms": 34.2,
+            "tMin": 1012.7,
+            "tP50": 935.7
+          }
+        },
+        "expectedPickMin": 16,
+        "expectedPickP50": 16
+      },
+      "direct": [
+        {
+          "picked": 16,
+          "wallS": 0.98
+        },
+        {
+          "picked": 16,
+          "wallS": 0.98
+        },
+        {
+          "picked": 16,
+          "wallS": 0.99
+        }
+      ]
+    },
+    "i8": {
+      "ep": "webgpu-aewnn",
+      "replica": {
+        "entries": [
+          [
+            2,
+            0.42553191462379064
+          ],
+          [
+            4,
+            0.6666666666666666
+          ],
+          [
+            8,
+            0.9523809525498997
+          ],
+          [
+            16,
+            0.9756097559645941
+          ],
+          [
+            32,
+            1.02236421722806
+          ]
+        ],
+        "picked": 8,
+        "steps": [
+          {
+            "size": 2,
+            "warmMs": 34.4,
+            "minMs": 4.7,
+            "t": 0.4,
+            "nIters": 6
+          },
+          {
+            "size": 4,
+            "warmMs": 7.8,
+            "minMs": 6,
+            "t": 0.7,
+            "nIters": 6
+          },
+          {
+            "size": 8,
+            "warmMs": 9,
+            "minMs": 8.4,
+            "t": 1,
+            "nIters": 6
+          },
+          {
+            "size": 16,
+            "warmMs": 17.1,
+            "minMs": 16.4,
+            "t": 1,
+            "nIters": 6
+          },
+          {
+            "size": 32,
+            "warmMs": 31.2,
+            "minMs": 31.3,
+            "t": 1,
+            "nIters": 6
+          }
+        ],
+        "broke": false
+      },
+      "replicaFix": {
+        "entries": [
+          [
+            2,
+            0.40816326543024706
+          ],
+          [
+            4,
+            0.64516129040011
+          ],
+          [
+            8,
+            0.8888888888888888
+          ],
+          [
+            16,
+            0.9302325581798301
+          ],
+          [
+            32,
+            0.9411764705882353
+          ]
+        ],
+        "picked": 8,
+        "steps": [
+          {
+            "size": 2,
+            "warmMs": 6.4,
+            "minMs": 4.9,
+            "t": 0.4,
+            "nIters": 6
+          },
+          {
+            "size": 4,
+            "warmMs": 6.5,
+            "minMs": 6.2,
+            "t": 0.6,
+            "nIters": 6
+          },
+          {
+            "size": 8,
+            "warmMs": 9.4,
+            "minMs": 9,
+            "t": 0.9,
+            "nIters": 6
+          },
+          {
+            "size": 16,
+            "warmMs": 17.5,
+            "minMs": 17.2,
+            "t": 0.9,
+            "nIters": 6
+          },
+          {
+            "size": 32,
+            "warmMs": 35.2,
+            "minMs": 34,
+            "t": 0.9,
+            "nIters": 6
+          }
+        ],
+        "broke": false
+      },
+      "ground": {
+        "sizes": {
+          "1": {
+            "minMs": 3.3,
+            "p50Ms": 4.4,
+            "tMin": 303,
+            "tP50": 227.3
+          },
+          "2": {
+            "minMs": 4.5,
+            "p50Ms": 5.5,
+            "tMin": 444.4,
+            "tP50": 363.6
+          },
+          "4": {
+            "minMs": 6.1,
+            "p50Ms": 7.1,
+            "tMin": 655.7,
+            "tP50": 563.4
+          },
+          "8": {
+            "minMs": 9.1,
+            "p50Ms": 9.9,
+            "tMin": 879.1,
+            "tP50": 808.1
+          },
+          "16": {
+            "minMs": 16.5,
+            "p50Ms": 17.8,
+            "tMin": 969.7,
+            "tP50": 898.9
+          },
+          "32": {
+            "minMs": 31.6,
+            "p50Ms": 33.7,
+            "tMin": 1012.7,
+            "tP50": 949.6
+          }
+        },
+        "expectedPickMin": 16,
+        "expectedPickP50": 16
+      },
+      "direct": [
+        {
+          "picked": 16,
+          "wallS": 0.96
+        },
+        {
+          "picked": 16,
+          "wallS": 0.97
+        },
+        {
+          "picked": 16,
+          "wallS": 0.98
+        }
+      ]
+    }
+  }
 }
