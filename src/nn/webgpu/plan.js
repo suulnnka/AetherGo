@@ -14,7 +14,7 @@
  *
  * 布局:trunk 全程 NHWC(b,361,96);q/k/v 由融合 GEMM 直接写成 head-major
  * (b,h,361,32),attention 输出写回 NHWC;输出 policy/ownership 按 NHWC 读回,
- * 由 session 的 JS 后处理(与 ort 路径同口径)出契约结果。
+ * 由 session 的 JS 后处理出契约结果(契约口径见 src/nn/session.js)。
  *
  * 融合点(对齐 PyTorch 训练侧的 fused_qkv_proj / fused_gate_proj):
  *   qkv 单 GEMM(96→288)、ffn1+gate 单 GEMM(96→512)、out_proj/ffn2 的
@@ -49,11 +49,12 @@ export function parseAewn(buffer) {
     throw new Error('.aewn: 魔数不符(不是 AEWN)');
   }
   const version = dv.getUint32(4, true);
-  const dtype = dv.getUint32(8, true);          // 0 = 全 f32;1 = i8f16(trunk 权重 int8 打包 u32 + 激活 f16)
+  const dtype = dv.getUint32(8, true);          // 唯一形态:1 = i8f16(trunk 权重 int8 打包 u32 + 激活 f16;
+                                                // 全 f32=0 与 f16 权重=2 已随 2026-10-08 拍板移除)
   const metaLen = dv.getUint32(12, true);
   const nTensors = dv.getUint32(16, true);
   if (version !== 1) throw new Error(`.aewn: 不支持的版本 ${version}`);
-  if (dtype !== 0 && dtype !== 1 && dtype !== 2) throw new Error(`.aewn: 不支持的 dtype ${dtype}`);
+  if (dtype !== 1) throw new Error(`.aewn: 不支持的 dtype ${dtype}(引擎仅支持 i8f16=1)`);
   let off = 20;
   const dir = [];
   for (let i = 0; i < nTensors; i++) {
@@ -76,11 +77,9 @@ export function parseAewn(buffer) {
     if (t.tOff % 4 !== 0) throw new Error(`.aewn: 张量 ${t.name} 偏移未对齐`);
     range.set(t.name, { byteOffset: t.tOff, byteLength: t.nbytes });
     dims.set(t.name, t.dims);
-    w.set(t.name, quant[t.name] && dtype === 1
-      ? new Uint32Array(buffer, t.tOff, t.nbytes >> 2)      // 4×int8 打包 u32
-      : quant[t.name] && dtype === 2
-        ? new Uint16Array(buffer, t.tOff, t.nbytes >> 1)    // f16 位型
-        : new Float32Array(buffer, t.tOff, t.nbytes >> 2));
+    w.set(t.name, quant[t.name]
+      ? new Uint32Array(buffer, t.tOff, t.nbytes >> 2)     // 4×int8 打包 u32
+      : new Float32Array(buffer, t.tOff, t.nbytes >> 2));  // 头部/排除清单留 f32
   }
   return { meta, w, range, dims, dtype };
 }

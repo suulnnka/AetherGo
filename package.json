@@ -2,7 +2,7 @@
   "name": "aether-go",
   "version": "0.1.0",
   "type": "module",
-  "description": "19×19 围棋对弈引擎:纯 JS 规则(position superko + 中国规则数子含双停死子)+ 浏览器 WebGPU ONNX 推理与 PUCT 搜索(fillRowV7 特征编码器,KataGo 搜索机制对齐)",
+  "description": "19×19 围棋对弈引擎:纯 JS 规则(position superko + 中国规则数子含双停死子)+ 浏览器 WebGPU 自研推理 aewnn(i8 权重 f16 计算)与 PUCT 搜索(fillRowV7 特征编码器,KataGo 搜索机制对齐)",
   "main": "src/engine.js",
   "exports": {
     ".": "./src/engine.js",
@@ -11,11 +11,8 @@
   "scripts": {
     "test": "node test/engine-test.mjs && node test/features-test.mjs && node test/katago-align-test.mjs && node test/worker-smoke-test.mjs",
     "test:featdiff": "node test/featdiff.mjs /tmp/featdiff.json && node test/featdiff.mjs /tmp/featdiff20.json",
-    "test:nn-e2e": "node test/nn-e2e.mjs",
-    "match": "node test/nn-match.mjs",
-    "test:aewnn": "node test/aewnn-wgsl-test.mjs && node test/aewnn-cpuref-test.mjs",
+    "test:aewnn": "node test/aewnn-wgsl-test.mjs",
     "bench:aewnn": "node test/aewnn-bench.mjs",
-    "diff:aewnn": "node test/aewnn-stage-diff.mjs && node test/aewnn-gpu-probe.mjs",
     "test:quant": "node test/aewnn-quant-test.mjs"
   },
   "license": "MIT",
@@ -31,8 +28,7 @@
     "19x19",
     "engine",
     "mcts",
-    "webgpu",
-    "onnx"
+    "webgpu"
   ],
   "private": false
 }

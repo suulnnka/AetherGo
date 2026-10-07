@@ -136,7 +136,7 @@ const SQRT_AREA = Math.sqrt(N2);
 /* ==================== 搜索随机对称(KataGo nnEvaluator 同款) ====================
  * 每次评估随机取 8 对称之一,把对称编号随行下发(rows[i].sym)—— 置换在
  * **引擎侧**做(aewnn:stem 卷积按 gather 表直接以变换后坐标取输入,零 CPU
- * 置换;ort 路径:session 内 CPU 置换,成本同旧版)。global 与值输出
+ * 置换)。global 与值输出
  * (winLoss/scoreMean/policyPass)为不变量;policy/ownership 按逆置换
  * (unpermuteOut,dst[p] = src[perm[p]])还原到恒等坐标系。模型经对称增广
  * 训练,对变换输入的评估 ≈ 变换输出,残差即去相关评估噪声 —— 打破确定性

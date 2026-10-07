@@ -10,17 +10,20 @@
  *      f16 舍入量级(远宽于 f32 对拍)。
  *
  * 运行:node test/aewnn-quant-test.mjs
- * (第 3 层需 Dawn:npm i --no-save webgpu;无则跳过)
+ * (第 3 层需 Dawn:npm i --no-save webgpu;无则跳过。
+ *  onnx 已出库(2026-10-08):golden 模型经 QONNX 环境变量指路(训练管线产物);
+ *  不在场时第 2 层跳过,第 1/3 层照常。)
  */
 import { spawn } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join } from 'node:path';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, '..');
 const PY = process.env.PYTHON_BIN ?? '/home/a/miniconda3/envs/bleed/bin/python';
-const MODEL = join(ROOT, 'models/b8c96h3tfrs_19.onnx');
+const MODEL = process.env.QONNX ?? join(ROOT, 'models/b8c96h3tfrs_19.onnx');
+const HAVE_GOLDEN = existsSync(MODEL);
 
 const { N, N2, BLACK, WHITE, PASS, newBoard, make } = await import(pathToFileURL(join(ROOT, 'src/engine.js')).href);
 const { encodeFeatures } = await import(pathToFileURL(join(ROOT, 'src/nn/features.js')).href);
@@ -34,28 +37,34 @@ const check = (name, cond, extra) => {
 };
 const softplus = (x) => (x > 30 ? x : Math.log1p(Math.exp(x)));
 
-/* ---------- golden 服务(ort CPU fp32) ---------- */
-const server = spawn(PY, [join(ROOT, 'tools/diff/full_ort_server.py'), MODEL], {
-  stdio: ['pipe', 'pipe', 'inherit'],
-  env: { ...process.env, CUDA_VISIBLE_DEVICES: '' },
-});
-let buf = '';
+/* ---------- golden 服务(ort CPU fp32;onnx 在场才起) ---------- */
+let server = null;
 const pending = [];
-server.stdout.on('data', (d) => {
-  buf += d.toString();
-  let nl;
-  while ((nl = buf.indexOf('\n')) >= 0) {
-    const line = buf.slice(0, nl); buf = buf.slice(nl + 1);
-    const t = line.trim();
-    if (!t) continue;
-    if (!t.startsWith('[')) { console.log(`[server stdout] ${t}`); continue; }
-    pending.shift().resolve(JSON.parse(t));
-  }
-});
-const golden = (rows) => new Promise((resolve, reject) => {
-  pending.push({ resolve, reject });
-  server.stdin.write(JSON.stringify({ rows }) + '\n');
-});
+let buf = '';
+if (HAVE_GOLDEN) {
+  server = spawn(PY, [join(ROOT, 'tools/diff/full_ort_server.py'), MODEL], {
+    stdio: ['pipe', 'pipe', 'inherit'],
+    env: { ...process.env, CUDA_VISIBLE_DEVICES: '' },
+  });
+  server.stdout.on('data', (d) => {
+    buf += d.toString();
+    let nl;
+    while ((nl = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, nl); buf = buf.slice(nl + 1);
+      const t = line.trim();
+      if (!t) continue;
+      if (!t.startsWith('[')) { console.log(`[server stdout] ${t}`); continue; }
+      pending.shift().resolve(JSON.parse(t));
+    }
+  });
+}
+const golden = (rows) => {
+  if (!server) return Promise.reject(new Error('no golden (QONNX 未指路)'));
+  return new Promise((resolve, reject) => {
+    pending.push({ resolve, reject });
+    server.stdin.write(JSON.stringify({ rows }) + '\n');
+  });
+};
 
 /* ---------- 局面集(与 cpuref golden 测试同源) ---------- */
 const SEQ_MID = [
@@ -115,15 +124,15 @@ for (let c0 = 0; c0 < CASES.length; c0 += 8) {
       optimism,
     };
   });
-  const [gold, refs] = await Promise.all([
-    golden(gRows),
-    qSession.evalBatch(group.map(({ bd, side, moves, sym, optimism }) => {
-      const f = encodeFeatures(bd, side, { recentMoves: moves, komi: 7.5 });
-      return { spatial: f.spatial, global: f.global, sym, optimism };
-    })),
-  ]);
+  const refsP = qSession.evalBatch(group.map(({ bd, side, moves, sym, optimism }) => {
+    const f = encodeFeatures(bd, side, { recentMoves: moves, komi: 7.5 });
+    return { spatial: f.spatial, global: f.global, sym, optimism };
+  }));
+  const gold = HAVE_GOLDEN ? await golden(gRows) : null;
+  const refs = await refsP;
   group.forEach((cs, i) => {
-    const g = gold[i], r = refs[i];
+    const g = gold?.[i], r = refs[i];
+    if (!g) return;                                // 无 golden:只做激活范围扫描
     /* softmax(362 含 pass)上的 KL(p‖q) */
     const lgG = new Float64Array(N2 + 1), lgQ = new Float64Array(N2 + 1);
     for (let p = 0; p < N2; p++) { lgG[p] = g.policy[p]; lgQ[p] = r.policy[p]; }
@@ -162,32 +171,36 @@ for (let c0 = 0; c0 < CASES.length; c0 += 8) {
   });
 }
 const nCases = CASES.length;
+if (!HAVE_GOLDEN) {
+  console.log(`
+(onnx golden 不在场(QONNX 可指路),跳过 L2 输出级对拍;激活范围扫描照常)`);
+}
 const kl = sumKL / nCases;
 const top1 = (top1Agree + nearTieFlips) / nCases;
 const top1Raw = top1Agree / nCases;
 const top5 = top5J / nCases;
 const wl = sumWL / nCases, lead = sumLead / nCases, own = sumOwn / nCases, passDev = sumPass / nCases;
 
-console.log(`\n== L2 输出级(cpuref-Q 即纯 int8 权重效应,${nCases} 例) ==`);
-console.log(`policy KL      = ${kl.toExponential(3)} nat(闸门 < 1e-3)`);
-console.log(`top1 一致率    = ${(top1 * 100).toFixed(2)}%(近平局翻转 ${nearTieFlips} + 实质翻转 ${realFlip};闸门 ≥ 99%,权威 = 研究 8192 盘面 98.02%)${top1Disagree.length ? '  实质分歧: ' + top1Disagree.join(' ') : ''}`);
-console.log(`top5 重合      = ${(top5 * 100).toFixed(2)}%(闸门 ≥ 98%)`);
-console.log(`winLoss MAE    = ${wl.toExponential(3)}(闸门 < 1e-3)`);
-console.log(`scoreLead MAE  = ${lead.toExponential(3)} 目(闸门 < 0.1)`);
-console.log(`ownership MAE  = ${own.toExponential(3)}(闸门 < 0.01)`);
-console.log(`pass logits 偏差 = ${passDev.toExponential(3)}(闸门 < 1e-2)`);
-check('L2 ownership MAE', own < 0.01, `${own.toExponential(2)}`);
+if (HAVE_GOLDEN) console.log(`\n== L2 输出级(cpuref-Q 即纯 int8 权重效应,${nCases} 例) ==`);
+if (HAVE_GOLDEN) console.log(`policy KL      = ${kl.toExponential(3)} nat(闸门 < 1e-3)`);
+if (HAVE_GOLDEN) console.log(`top1 一致率    = ${(top1 * 100).toFixed(2)}%(近平局翻转 ${nearTieFlips} + 实质翻转 ${realFlip};闸门 ≥ 99%,权威 = 研究 8192 盘面 98.02%)${top1Disagree.length ? '  实质分歧: ' + top1Disagree.join(' ') : ''}`);
+if (HAVE_GOLDEN) console.log(`top5 重合      = ${(top5 * 100).toFixed(2)}%(闸门 ≥ 98%)`);
+if (HAVE_GOLDEN) console.log(`winLoss MAE    = ${wl.toExponential(3)}(闸门 < 1e-3)`);
+if (HAVE_GOLDEN) console.log(`scoreLead MAE  = ${lead.toExponential(3)} 目(闸门 < 0.1)`);
+if (HAVE_GOLDEN) console.log(`ownership MAE  = ${own.toExponential(3)}(闸门 < 0.01)`);
+if (HAVE_GOLDEN) console.log(`pass logits 偏差 = ${passDev.toExponential(3)}(闸门 < 1e-2)`);
+if (HAVE_GOLDEN) check('L2 ownership MAE', own < 0.01, `${own.toExponential(2)}`);
 /* 验收口径 = quant_explore 在第 40 批权重上的实测 int8w 行(8192 盘面:
  * Top1 98.02% / KL 7.9e-4 / winMAE 5.1e-3 / 目差 MAE 0.061),即「W8A16 基本无损」
  * 的经验基线;本机 30 例小样本对平局翻转敏感,闸门放宽一档,10 倍绊线防恶化。 */
-check('L2 winLoss MAE(对表研究 5.1e-3)', wl < 0.01, `${wl.toExponential(2)}`);
-check('L2 scoreLead MAE(对表研究 0.061 目)', lead < 0.15, `${lead.toExponential(2)}`);
+if (HAVE_GOLDEN) check('L2 winLoss MAE(对表研究 5.1e-3)', wl < 0.01, `${wl.toExponential(2)}`);
+if (HAVE_GOLDEN) check('L2 scoreLead MAE(对表研究 0.061 目)', lead < 0.15, `${lead.toExponential(2)}`);
 /* pass 单项与 KL 冗余(KL 已覆盖 362 点含 pass),放宽为 0.1 绊线 */
-check('L2 pass logits(绊线 0.1;KL 已覆盖)', passDev < 0.1, `${passDev.toExponential(2)}`);
-check('L2 policy KL(对表研究 7.9e-4)', kl < 2e-3, `${kl.toExponential(2)}`);
-check('L2 top1 一致率(近平局不计;对表研究 98.0%)', top1 >= 0.95 && realFlip === 0,
+if (HAVE_GOLDEN) check('L2 pass logits(绊线 0.1;KL 已覆盖)', passDev < 0.1, `${passDev.toExponential(2)}`);
+if (HAVE_GOLDEN) check('L2 policy KL(对表研究 7.9e-4)', kl < 2e-3, `${kl.toExponential(2)}`);
+if (HAVE_GOLDEN) check('L2 top1 一致率(近平局不计;对表研究 98.0%)', top1 >= 0.95 && realFlip === 0,
   `含近平局 ${(top1 * 100).toFixed(2)}%,实质翻转 ${realFlip}`);
-check('L2 top5 重合', top5 >= 0.95, `${(top5 * 100).toFixed(2)}%`);
+if (HAVE_GOLDEN) check('L2 top5 重合', top5 >= 0.95, `${(top5 * 100).toFixed(2)}%`);
 
 /* 第 1 层:激活范围(f16 安全性) */
 const ar = qSession.__actRange;
@@ -226,6 +239,6 @@ if (dawn) {
   console.log('\n(无 Dawn 绑定,跳过 WGSL-Q 层)');
 }
 
-server.stdin.end();
-server.kill();
+server?.stdin.end();
+server?.kill();
 process.exit(failed ? 1 : 0);

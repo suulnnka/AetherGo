@@ -1,8 +1,8 @@
 /* aewnn 吞吐基准(Dawn,dawn-node 环境)。
  *
  * 注意:WSL2 开发机上 Dawn 通常落在 llvmpipe(软件 Vulkan),数字只反映
- * 软件渲染下限,不代表目标设备 —— 与 ort-web 的正式 A/B 按调研 M3 闸门
- * 在浏览器(桌面 Chrome + 中端 Android)实测。本基准的用途:
+ * 软件渲染下限,不代表目标设备 —— 正式口径在浏览器(桌面 Chrome + 中端
+ * Android)实测。本基准的用途:
  *   1. 满容量批(CAP=32)与全 dispatch 链的烟测;
  *   2. 校准口径(≥最优 90% 的最小批)在真设备上的现成测速器;
  *   3. 会话创建耗时(shader 编译 × 84 + 权重上传)。
@@ -24,7 +24,7 @@ const { createAewnnSession } = await import(pathToFileURL(join(ROOT, 'src/nn/web
 const { pickBatchSizeFromThroughput } = await import(pathToFileURL(join(ROOT, 'src/nn/session.js')).href);
 
 const { ensureBlob } = await import('./blob-helper.mjs');
-const blob = ensureBlob('b8c96h3tfrs_19.aewn', ['f32']);
+const blob = ensureBlob('b8c96h3tfrs_19.i8.aewn');
 
 const adapter = await navigator.gpu.requestAdapter();
 const ai = adapter.info ?? {};
@@ -32,12 +32,9 @@ console.log(`adapter: ${ai.vendor ?? '?'} ${ai.architecture ?? ''} ${ai.device ?
 const t0 = performance.now();
 const gpu = await createAewnnSession({ blob, calibrate: false, onStatus: () => {} });
 const loadMs = performance.now() - t0;
-console.log(`会话创建(含 84 pipeline 编译 + 3.8MB 权重上传): ${loadMs.toFixed(0)}ms,dispatch ${gpu.dispatchCount}`);
+console.log(`会话创建(i8f16,含 84 pipeline 编译 + 1.1MB 权重上传): ${loadMs.toFixed(0)}ms,dispatch ${gpu.dispatchCount}`);
 
 /* 中盘特征 ×32 份做满容量验证与吞吐 */
-const bd = newBoard();
-const SEQ = [[3,3],[15,15],[3,15],[15,3],[9,9],[3,9],[15,9],[9,3],[9,15],[5,5],[13,13]];
-for (let i = 0; i < SEQ.length; i++) { void bd; }
 const f = encodeFeatures(newBoard(), BLACK, { recentMoves: [], komi: 7.5 });
 
 const proto = { spatial: f.spatial, global: f.global, sym: 0, optimism: 1.0 };
@@ -59,27 +56,4 @@ for (const size of [1, 2, 4, 8, 16, 32]) {
 }
 console.log(`校准口径(≥最优90% 最小批)→ maxBatch = ${pickBatchSizeFromThroughput(entries)}`);
 gpu.dispose();
-
-/* 量化版(i8f16):int8 权重 + f16 激活,同口径对表 */
-const qbuf = ensureBlob('b8c96h3tfrs_19.i8.aewn', ['i8f16']);
-{
-  const t1 = performance.now();
-  const gq = await createAewnnSession({ blob: qbuf, calibrate: false, onStatus: () => {} });
-  console.log(`\n[量化版] 会话创建: ${(performance.now() - t1).toFixed(0)}ms,dispatch ${gq.dispatchCount}`);
-  const eq = [];
-  for (const size of [1, 8, 32]) {
-    const rows = Array.from({ length: size }, () => proto);
-    await gq.evalBatch(rows);
-    let minMs = Infinity;
-    for (let k = 0; k < 10; k++) {
-      const t = performance.now();
-      await gq.evalBatch(rows);
-      minMs = Math.min(minMs, performance.now() - t);
-    }
-    eq.push([size, size / minMs]);
-    console.log(`批 ${String(size).padStart(2)}: 总 ${minMs.toFixed(2)}ms = ${(size / minMs).toFixed(2)} rows/ms`);
-  }
-  console.log(`量化版 maxBatch = ${pickBatchSizeFromThroughput(eq)}`);
-  gq.dispose();
-}
 process.exit(0);

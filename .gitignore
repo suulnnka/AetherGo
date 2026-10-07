@@ -32,11 +32,10 @@ gtp_logs/
 Thumbs.db
 
 # --- 说明 ---
-# models/*.onnx 不忽略:模型是发布资产(在线对弈页按相对路径加载),
-# 按「仅支持一种模型」的产品边界,models/ 内始终只保留当前在役的那一个。
-# .aewn 入库两份(2026-10-07 二次拍板:仅 i8 默认 + f32 golden;f16 权重版
-# 撤销,不允许出现在仓库与历史,见 git filter-repo 清理提交):
-#   .i8.aewn 默认(int8 权重 + f16 激活)/ .aewn fp32 golden(对拍基准)。
+# models/ 仅一份发布资产:.i8.aewn(int8 权重 + f16 激活,在线对弈页按相对
+# 路径加载)。2026-10-08 拍板:onnx 与 fp32 golden blob 出库,引擎仅支持
+# i8f16(onnxruntime-web 逃生舱与 ?weights=f32 通道移除);重打包走
+# training/pack_aewn.py。f16 权重版已撤销,不允许出现在仓库与历史。
 models/b8c96h3tfrs_19.f16.aewn
 # 本机差分手册,含机器路径等私有信息,不入库(本地保留)
 docs/DIFF_WORKFLOW.md

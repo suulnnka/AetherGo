@@ -329,13 +329,14 @@ function endGame(score, isResign = false) {
 }
 
 /* ---------- Worker:难度表 / 局面事实 / 搜索都经它 ----------
- * 唯一引擎:src/nn-worker.js(aethernn 自研 WebGPU 推理,?engine=ort 切 ort-web 逃生舱),
- * PUCT 搜索对齐 KataGo;UCT 随机演棋引擎已于 2026-10-02 移除)。 */
+ * 唯一引擎:src/nn-worker.js(aethernn 自研 WebGPU 推理,i8 权重 f16 计算,
+ * PUCT 搜索对齐 KataGo;UCT 随机演棋引擎已于 2026-10-02 移除,
+ * ?engine=ort 逃生舱已于 2026-10-08 移除)。 */
 let worker = null, reqSeq = 0, stateSeq = 0, statePending = null;
 let nnLoaded = false, nnWanted = false; // 模型是否就绪 / 是否在等它思考
 /* 学生模型 b8c96h3tfrs 第 40 份(s68320512,循环赛 40>41>45 拍板):
  * v17 transformer,dumponnx 19 路导出 —— 旧占位 b6c96 已退役,仅支持此模型 */
-const NN_MODEL_URL = new URL('../models/b8c96h3tfrs_19.onnx', import.meta.url).href;
+const NN_MODEL_URL = new URL('../models/b8c96h3tfrs_19.i8.aewn', import.meta.url).href;
 
 function killWorker() {
   if (worker) { worker.terminate(); worker = null; }
@@ -372,10 +373,7 @@ function ensureWorker() {
   levelSel.disabled = true;
   levelSel.title = 'NN 引擎加载中…';
   infoL.textContent = 'NN:加载运行时与模型…';
-  /* 引擎选择:aewnn 缺省;页面 URL ?engine=ort 切 onnxruntime-web 逃生舱
-   * (Worker 里读不到页面 location,须经 load 消息显式下发)。 */
-  const engine = new URLSearchParams(location.search).get('engine') ?? undefined;
-  worker.postMessage({ id: ++reqSeq, type: 'load', modelUrl: NN_MODEL_URL, engine });
+  worker.postMessage({ id: ++reqSeq, type: 'load', modelUrl: NN_MODEL_URL });
   return worker;
 }
 

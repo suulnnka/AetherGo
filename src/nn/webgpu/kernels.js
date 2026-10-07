@@ -9,17 +9,16 @@
  *   - flashAttention ← flashAttention(去掩码分支)
  *   - rmsNorm ← rmsNorm(NCHW→NHWC,索引更简)
  *
- * 两种模式(buildKernels(mode),与 .aewn 的 header.dtype 对应):
- *   'f32'  全 fp32 存储/计算(对拍基准)。
- *   'q'    i8f16(INT8 报告 §4.1 方案 A 的引擎侧实现):
- *          - trunk 大权重 int8(4×int8 打包 u32,LSB 在前)+ per-oc f32 scale,
- *            tile 装载时反量化(shader 移位取字节,免 i8 类型);
- *          - 激活中间量 f16 存储、寄存器/共享内存/累加一律 f32
- *            (katago-webgpu 的「f16 storage + fp32 compute」形态;需要
- *            adapter 的 shader-f16 特性);
- *          - 头部(policy/value)按排除清单留 f32 权重,但输入仍是 f16 激活;
- *          - gp 池化向量与全部输出缓冲(pol/pass/val/misc/own)保持 f32
- *            (免 JS 侧 f16 解码;量小,带宽无关紧要)。
+ * 权重形态唯一:i8f16(2026-10-08 起,全 f32 模式与 f16 权重模式移除)
+ *   (INT8 报告 §4.1 方案 A 的引擎侧实现):
+ *   - trunk 大权重 int8(4×int8 打包 u32,LSB 在前)+ per-oc f32 scale,
+ *     tile 装载时反量化(shader 移位取字节,免 i8 类型);
+ *   - 激活中间量 f16 存储、寄存器/共享内存/累加一律 f32
+ *     (katago-webgpu 的「f16 storage + fp32 compute」形态;需要
+ *     adapter 的 shader-f16 特性);
+ *   - 头部(policy/value)按排除清单留 f32 权重,但输入仍是 f16 激活;
+ *   - gp 池化向量与全部输出缓冲(pol/pass/val/misc/own)保持 f32
+ *     (免 JS 侧 f16 解码;量小,带宽无关紧要)。
  *
  * 融合清单(相对 ONNX 图的 423 节点):
  *   stem    conv3x3 + 对称 gather + linear_global 广播加  → 1 dispatch
@@ -33,63 +32,11 @@
  * ============================================================ */
 
 /* ---- GEMM 家族:16×16 平铺,A=激活 NHWC (n·361, K),W=[K][O] k 主序 ----
- * 三种权重/IO 形态:
- *   gemmSource     f32 权重,f32 io(f32 模式全体 + 无)
- *   gemm32Source   f32 权重,f16 io(q 模式的头部 GEMM:conv1p/conv1g/conv1)
- *   gemmQSource    int8 权重(u32 打包+scale),f16 io(q 模式 trunk GEMM)
+ * 两种权重形态(i8f16 唯一激活口径:f16 存储、f32 累加):
+ *   gemm32Source   f32 权重,f16 io(头部 GEMM + 排除清单张量)
+ *   gemmQSource    int8 权重(u32 打包+scale),f16 io(trunk GEMM;
+ *                  wkind='f32' 变体用于排除张量的 res 形态)
  * 变体以 epilogue 区分:plain / res(残差加,f16)/ biasrelu(f32 bias)。 */
-
-function gemmSource(epi, name) {
-  const extra = epi === 'res'
-    ? `@group(0) @binding(4) var<storage, read>       geRes : array<f32>;`
-    : epi === 'biasrelu'
-      ? `@group(0) @binding(4) var<storage, read>       geBias : array<f32>;`
-      : ``;
-  const epilogue = epi === 'res'
-    ? `acc = acc + geRes[(n2 * 361u + m) * geo.o + o];`
-    : epi === 'biasrelu'
-      ? `acc = max(acc + geBias[o], 0.0);`
-      : ``;
-  return /* wgsl */ `
-struct GParams { n: u32, k: u32, o: u32, pad: u32 };
-@group(0) @binding(0) var<uniform> geo : GParams;
-@group(0) @binding(1) var<storage, read>       geIn  : array<f32>;
-@group(0) @binding(2) var<storage, read>       geW   : array<f32>;
-${extra}
-@group(0) @binding(3) var<storage, read_write> geOut : array<f32>;
-
-var<workgroup> geAs : array<f32, 256>;   // W tile [o][k]
-var<workgroup> geBs : array<f32, 256>;   // in tile [k][m]
-
-@compute @workgroup_size(16, 16)
-fn ${name}(@builtin(workgroup_id) wid : vec3<u32>, @builtin(local_invocation_id) lid : vec3<u32>) {
-  let n2 = wid.z;
-  let o  = wid.x * 16u + lid.x;          // 输出通道
-  let m  = wid.y * 16u + lid.y;          // 空间位置 [0,361)
-  var acc : f32 = 0.0;
-  let nTiles = (geo.k + 15u) / 16u;
-  for (var t : u32 = 0u; t < nTiles; t = t + 1u) {
-    let kA = t * 16u + lid.y;
-    var av : f32 = 0.0;
-    if (o < geo.o && kA < geo.k) { av = geW[kA * geo.o + o]; }
-    geAs[lid.x * 16u + lid.y] = av;
-    let kB = t * 16u + lid.x;
-    var bv : f32 = 0.0;
-    if (kB < geo.k && m < 361u) { bv = geIn[(n2 * 361u + m) * geo.k + kB]; }
-    geBs[lid.x * 16u + lid.y] = bv;
-    workgroupBarrier();
-    for (var kk : u32 = 0u; kk < 16u; kk = kk + 1u) {
-      acc = acc + geAs[lid.x * 16u + kk] * geBs[kk * 16u + lid.y];
-    }
-    workgroupBarrier();
-  }
-  if (o < geo.o && m < 361u) {
-    ${epilogue}
-    geOut[(n2 * 361u + m) * geo.o + o] = acc;
-  }
-}
-`;
-}
 
 function gemm32Source(epi, name) {
   const extra = epi === 'biasrelu'
@@ -140,10 +87,9 @@ fn ${name}(@builtin(workgroup_id) wid : vec3<u32>, @builtin(local_invocation_id)
 
 function gemmQSource(epi, name, wkind = 'i8') {
   const i8 = wkind === 'i8';
-  const f16w = wkind === 'f16';
   /* 绑定:[0]u [1]in [2]W [3](S=i8) [3|4](res/bias) [末]out。
    * res 输入 f16(残差载体),bias 向量 f32(头部常量)。wkind='f32' 用于
-   * q 模式下被排除的张量(f32 权重 + f16 io,逐层敏感度排除用)。 */
+   * 排除清单张量(f32 权重 + f16 io,逐层敏感度排除用)。 */
   /* 绑定序与 session 一致:f16+biasrelu 是 [u,in,W,out,bias](out@3,bias@4),
    * 其余 res/bias 在 out 之后。 */
   const extraB = 4;
@@ -164,7 +110,7 @@ enable f16;
 struct GParams { n: u32, k: u32, o: u32, pad: u32 };
 @group(0) @binding(0) var<uniform> geo : GParams;
 @group(0) @binding(1) var<storage, read>       geIn  : array<f16>;
-@group(0) @binding(2) var<storage, read>       geW   : array<${i8 ? 'u32' : f16w ? 'f16' : 'f32'}>;
+@group(0) @binding(2) var<storage, read>       geW   : array<${i8 ? 'u32' : 'f32'}>;
 ${i8 ? `@group(0) @binding(3) var<storage, read>       geS   : array<f32>;` : ''}
 ${extra}
 @group(0) @binding(${outB}) var<storage, read_write> geOut : array<f16>;
@@ -187,9 +133,7 @@ fn ${name}(@builtin(workgroup_id) wid : vec3<u32>, @builtin(local_invocation_id)
     ? `let lin = kA * geo.o + o;
       let byte = (geW[lin >> 2u] >> ((lin & 3u) * 8u)) & 0xFFu;   // 4×int8 LSB 在前
       av = (f32(byte) - select(0.0, 256.0, byte >= 128u)) * geS[o];`
-    : f16w
-      ? `av = f32(geW[kA * geo.o + o]);`
-      : `av = geW[kA * geo.o + o];`}
+    : `av = geW[kA * geo.o + o];`}
     }
     geAs[lid.x * 16u + lid.y] = av;
     let kB = t * 16u + lid.x;
@@ -210,22 +154,20 @@ fn ${name}(@builtin(workgroup_id) wid : vec3<u32>, @builtin(local_invocation_id)
 `;
 }
 
-/* qkv 变体生成(f32 与 Q 两形态):输出按 o 散排到 head-major (b,h,361,32) 三缓冲 */
-function gemmQkvSource(wkind, ioF16 = true, name = 'gemmQkv') {
+/* qkv 变体生成(wkind='i8' 量化 | 'f32' 排除清单):f16 io,输出按 o 散排到
+ * head-major (b,h,361,32) 三缓冲 */
+function gemmQkvSource(wkind, name = 'gemmQkv') {
   const quant = wkind === 'i8';
-  const f16 = ioF16;
-  const inT = f16 ? 'f16' : 'f32';
-  const outT = f16 ? 'f16' : 'f32';
   return /* wgsl */ `
-${f16 ? 'enable f16;' : ''}
+enable f16;
 struct GParams { n: u32, k: u32, o: u32, pad: u32 };
 @group(0) @binding(0) var<uniform> gq : GParams;
-@group(0) @binding(1) var<storage, read>       gqIn  : array<${inT}>;
-@group(0) @binding(2) var<storage, read>       gqW   : array<${wkind === 'i8' ? 'u32' : wkind === 'f16' ? 'f16' : 'f32'}>;
+@group(0) @binding(1) var<storage, read>       gqIn  : array<f16>;
+@group(0) @binding(2) var<storage, read>       gqW   : array<${quant ? 'u32' : 'f32'}>;
 ${quant ? `@group(0) @binding(6) var<storage, read>       gqS   : array<f32>;` : ''}
-@group(0) @binding(3) var<storage, read_write> gqQh  : array<${outT}>;
-@group(0) @binding(4) var<storage, read_write> gqKh  : array<${outT}>;
-@group(0) @binding(5) var<storage, read_write> gqVh  : array<${outT}>;
+@group(0) @binding(3) var<storage, read_write> gqQh  : array<f16>;
+@group(0) @binding(4) var<storage, read_write> gqKh  : array<f16>;
+@group(0) @binding(5) var<storage, read_write> gqVh  : array<f16>;
 
 var<workgroup> gqAs : array<f32, 256>;
 var<workgroup> gqBs : array<f32, 256>;
@@ -245,14 +187,12 @@ fn ${name}(@builtin(workgroup_id) wid : vec3<u32>, @builtin(local_invocation_id)
     ? `let lin = kA * gq.o + o;
         let byte = (gqW[lin >> 2u] >> ((lin & 3u) * 8u)) & 0xFFu;
         av = (f32(byte) - select(0.0, 256.0, byte >= 128u)) * gqS[o];`
-    : wkind === 'f16'
-      ? `av = f32(gqW[kA * gq.o + o]);`
-      : `av = gqW[kA * gq.o + o];`}
+    : `av = gqW[kA * gq.o + o];`}
     }
     gqAs[lid.x * 16u + lid.y] = av;
     let kB = t * 16u + lid.x;
     var bv : f32 = 0.0;
-    if (kB < gq.k && m < 361u) { bv = ${f16 ? 'f32(gqIn[(n2 * 361u + m) * gq.k + kB])' : 'gqIn[(n2 * 361u + m) * gq.k + kB]'}; }
+    if (kB < gq.k && m < 361u) { bv = f32(gqIn[(n2 * 361u + m) * gq.k + kB]); }
     gqBs[lid.x * 16u + lid.y] = bv;
     workgroupBarrier();
     for (var kk : u32 = 0u; kk < 16u; kk = kk + 1u) {
@@ -264,15 +204,15 @@ fn ${name}(@builtin(workgroup_id) wid : vec3<u32>, @builtin(local_invocation_id)
     /* 各段内的局部头号:q 取 o 直接拆,k/v 需先减段基址(o=96/192) */
     if (o < 96u) {
       let dst = ((n2 * 3u + o / 32u) * 361u + m) * 32u + (o % 32u);
-      gqQh[dst] = ${f16 ? 'f16(acc)' : 'acc'};
+      gqQh[dst] = f16(acc);
     } else if (o < 192u) {
       let ok = o - 96u;
       let dst = ((n2 * 3u + ok / 32u) * 361u + m) * 32u + (ok % 32u);
-      gqKh[dst] = ${f16 ? 'f16(acc)' : 'acc'};
+      gqKh[dst] = f16(acc);
     } else {
       let ov = o - 192u;
       let dst = ((n2 * 3u + ov / 32u) * 361u + m) * 32u + (ov % 32u);
-      gqVh[dst] = ${f16 ? 'f16(acc)' : 'acc'};
+      gqVh[dst] = f16(acc);
     }
   }
 }
@@ -291,14 +231,14 @@ export const HI_R = 4;
 function gemmHiSource({ epi, name, wkind = 'f32', ioF16, scatter = false }) {
   const i8 = wkind === 'i8';
   const T = ioF16 ? 'f16' : 'f32';
-  const Wt = i8 ? 'u32' : wkind === 'f16' ? 'f16' : 'f32';
+  const Wt = i8 ? 'u32' : 'f32';
   const ld = (expr) => (ioF16 ? `f32(${expr})` : expr);
 
   /* 绑定序逐一镜像低批模板(gemmSource/gemm32Source/gemmQSource/gemmQkvSource):
    * 非 scatter:i8 [U,in,W,S,(res|bias),out];非 i8 [U,in,W,out,(res|bias)]
    * scatter:   [U,in,W,qh,kh,vh,(S)] —— qh/kh/vh 即输出 */
   let src = `
-${ioF16 || i8 || wkind === 'f16' ? 'enable f16;' : ''}
+${ioF16 || i8 ? 'enable f16;' : ''}
 struct GParams { n: u32, k: u32, o: u32, pad: u32 };
 @group(0) @binding(0) var<uniform> geo : GParams;
 @group(0) @binding(1) var<storage, read>       gIn  : array<${T}>;
@@ -333,9 +273,7 @@ struct GParams { n: u32, k: u32, o: u32, pad: u32 };
     ? `let lin = kA * geo.o + o;
       let byte = (gW[lin >> 2u] >> ((lin & 3u) * 8u)) & 0xFFu;
       av = (f32(byte) - select(0.0, 256.0, byte >= 128u)) * gS[o];`
-    : wkind === 'f16'
-      ? `av = f32(gW[kA * geo.o + o]);`
-      : `av = gW[kA * geo.o + o];`;
+    : `av = gW[kA * geo.o + o];`;
 
   /* R 行展开:输入瓦片装载 / FMA / epilogue(WGSL 无三元,越界行用 select 取 0) */
   const row = (rb) => `(b0 + ${rb}u)`;
@@ -407,24 +345,23 @@ ${epiBlocks}}
   return src;
 }
 
-export function buildKernels(mode) {
-  const q = mode !== 'f32';                     // 'q'(int8 权重)| 'f16w'(f16 权重)
-  const T = q ? 'f16' : 'f32';                  // 激活中间量存储类型
-  const ld = (expr) => (q ? `f32(${expr})` : expr);   // 装载转换
-  const st = (expr) => (q ? `f16(${expr})` : expr);   // 存储转换
+export function buildKernels() {
+  /* i8f16 唯一形态:激活中间量 f16 存储(f32 累加) */
+  const T = 'f16';
+  const ld = (expr) => `f32(${expr})`;            // 装载转换
+  const st = (expr) => `f16(${expr})`;            // 存储转换
   const K = {};
 
   /* stem:对称 gather + conv3x3(22→96)+ linear_global 广播加 → NHWC trunk
    * out[n,q,oc] = Σ_{ic,d} W[oc,ic,d]·in[n,ic,inv_sym(q+δ)] + Σ_j Wg[oc,j]·g[n,j]
    * 盘外邻居以 zeroSlot 哨兵跳过(等价零填充)。压缩模式两矩阵都压缩(报告 58 层
-   * 口径含 linear_global);stem32 = f32 权重 + f16 io(q 模式排除时用)。 */
+   * 口径含 linear_global);stem32 = f32 权重 + f16 io(排除清单时用)。 */
   const stemSource = (wkind, name = 'stem') => {
     const i8 = wkind === 'i8';
-    const f16w = wkind === 'f16';
-    const W = i8 ? 'u32' : f16w ? 'f16' : 'f32';
+    const W = i8 ? 'u32' : 'f32';
     const wld = (expr) => (wkind === 'f32' ? expr : `f32(${expr})`);
     return /* wgsl */ `
-${q ? 'enable f16;' : ''}
+enable f16;
 struct StemParams { n: u32, zeroSlot: u32, pad0: u32, pad1: u32 };
 @group(0) @binding(0) var<uniform> st : StemParams;
 @group(0) @binding(1) var<storage, read>       stIn    : array<f32>;
@@ -477,12 +414,12 @@ fn ${name}(@builtin(global_invocation_id) gid : vec3<u32>) {
 }
 `;
   };
-  K.stem = stemSource(mode === 'q' ? 'i8' : mode === 'f16w' ? 'f16' : 'f32');
-  if (mode === 'q') { K.stem32 = stemSource('f32', 'stem32'); }
+  K.stem = stemSource('i8');
+  K.stem32 = stemSource('f32', 'stem32');
 
   /* rmsNorm:逐位置跨通道 RMS(eps=1e-6)× gamma。NHWC:线程 i 直接持 96 连续元素 */
   K.rms = /* wgsl */ `
-${q ? 'enable f16;' : ''}
+enable f16;
 struct RmsParams { n: u32, pad0: u32, pad1: u32, pad2: u32 };
 @group(0) @binding(0) var<uniform> rm : RmsParams;
 @group(0) @binding(1) var<storage, read>       rmIn    : array<${T}>;
@@ -511,7 +448,7 @@ fn rms(@builtin(global_invocation_id) gid : vec3<u32>) {
    * 读两元写两元,免竞态免中间缓冲)。gemmQkv 已把 q/k/v 散排为 head-major,
    * v 无需处理。cos/sin 表保持 f32。 */
   K.rope = /* wgsl */ `
-${q ? 'enable f16;' : ''}
+enable f16;
 struct ElmParams { n: u32, pad0: u32, pad1: u32, pad2: u32 };
 @group(0) @binding(0) var<uniform> rp : ElmParams;
 @group(0) @binding(1) var<storage, read_write> rpQh  : array<${T}>;
@@ -544,7 +481,7 @@ fn rope(@builtin(global_invocation_id) gid : vec3<u32>) {
 
   /* trunkfinal(fixup):x·scale[c]+bias[c] → relu(无归一化,ONNX norm_trunkfinal 同) */
   K.trunkFinal = /* wgsl */ `
-${q ? 'enable f16;' : ''}
+enable f16;
 struct ElmParams { n: u32, pad0: u32, pad1: u32, pad2: u32 };
 @group(0) @binding(0) var<uniform> tf : ElmParams;
 @group(0) @binding(1) var<storage, read>       tfIn    : array<${T}>;
@@ -564,7 +501,7 @@ fn trunkFinal(@builtin(global_invocation_id) gid : vec3<u32>) {
   /* poolPolicy:每 (n,c) 池化 → gp[mean, mean·0.5, max](InputMask 常数已折叠)
    * 一个 workgroup(32 线程)处理一行,线程 = 通道。gp 保持 f32(下游小核直接用)。 */
   K.poolPolicy = /* wgsl */ `
-${q ? 'enable f16;' : ''}
+enable f16;
 struct PoolParams { n: u32, pad0: u32, pad1: u32, pad2: u32 };
 @group(0) @binding(0) var<uniform> pp : PoolParams;
 @group(0) @binding(1) var<storage, read>       ppIn  : array<${T}>;
@@ -591,7 +528,7 @@ fn poolPolicy(@builtin(workgroup_id) wid : vec3<u32>, @builtin(local_invocation_
 
   /* poolValue:同上,第三统计 = mean·0.15(quad) */
   K.poolValue = /* wgsl */ `
-${q ? 'enable f16;' : ''}
+enable f16;
 struct PoolParams { n: u32, pad0: u32, pad1: u32, pad2: u32 };
 @group(0) @binding(0) var<uniform> pv : PoolParams;
 @group(0) @binding(1) var<storage, read>       pvIn  : array<${T}>;
@@ -616,7 +553,7 @@ fn poolValue(@builtin(workgroup_id) wid : vec3<u32>, @builtin(local_invocation_i
   /* lingFused:linear_g(gp)→g2[c] + gpbias(+p1)·bias2(scale/bias)→relu → act2
    * 一个 workgroup 一行,线程 = 通道;权重留 f32(头部,排除清单)。 */
   K.ling = /* wgsl */ `
-${q ? 'enable f16;' : ''}
+enable f16;
 struct PoolParams { n: u32, pad0: u32, pad1: u32, pad2: u32 };
 @group(0) @binding(0) var<uniform> lg : PoolParams;
 @group(0) @binding(1) var<storage, read>       lgP1   : array<${T}>;
@@ -725,7 +662,7 @@ fn valueMlp(@builtin(global_invocation_id) gid : vec3<u32>) {
 
   /* swiglu:hidden[i] = silu(gate[i])·gate[i+256](sigmoid 走 tanh 形式,Metal 安全) */
   K.swiglu = /* wgsl */ `
-${q ? 'enable f16;' : ''}
+enable f16;
 struct ElmParams { n: u32, pad0: u32, pad1: u32, pad2: u32 };
 @group(0) @binding(0) var<uniform> sw : ElmParams;
 @group(0) @binding(1) var<storage, read>       swGate : array<${T}>;
@@ -748,7 +685,7 @@ fn swiglu(@builtin(global_invocation_id) gid : vec3<u32>) {
   /* gemmSmall:小 O(头部 2 通道 policy、1 通道 ownership)的平凡 GEMM。
    * 输入 f16 激活(p1/act2/v1),权重 f32(头部),输出 f32(输出缓冲)。 */
   K.gemmSmall = /* wgsl */ `
-${q ? 'enable f16;' : ''}
+enable f16;
 struct GParams { n: u32, k: u32, o: u32, pad: u32 };
 @group(0) @binding(0) var<uniform> gs : GParams;
 @group(0) @binding(1) var<storage, read>       gsIn  : array<${T}>;
@@ -782,7 +719,7 @@ fn gemmSmall(@builtin(global_invocation_id) gid : vec3<u32>) {
     const accLines = Array.from({ length: NA }, (_, i) => `      a${i} = a${i} * corr + p * ${ld(`faV[kBase + ${i}u]`)};`).join('\n');
     const writeAll = Array.from({ length: NA }, (_, i) => `      faOut[outBase + ${i}u] = ${st(`a${i} * inv`)};`).join('\n');
     return /* wgsl */ `
-${q ? 'enable f16;' : ''}
+enable f16;
 struct ElmParams { n: u32, pad0: u32, pad1: u32, pad2: u32 };
 @group(0) @binding(0) var<uniform> fa : ElmParams;
 @group(0) @binding(1) var<storage, read>       faQ   : array<${T}>;
@@ -828,49 +765,26 @@ ${writeAll}
 `;
   };
 
-  /* ---- GEMM 主力(按模式装配) ---- */
-  if (mode === 'q') {
-    /* trunk 大权重:int8 + scale,f16 io(绑定序:[u, in, W, S, out] / res 时 [u, in, W, S, res, out]) */
-    K.gemmPlain = gemmQSource('plain', 'gemmPlain');
-    K.gemmRes = gemmQSource('res', 'gemmRes');
-    K.gemmQkv = gemmQkvSource('i8');
-    /* f32 权重 + f16 io(q 模式下被排除张量与头部用) */
-    K.gemmPlain32 = gemm32Source('plain', 'gemmPlain32');
-    K.gemmBiasRelu32 = gemm32Source('biasrelu', 'gemmBiasRelu32');
-    K.gemmRes32 = gemmQSource('res', 'gemmRes32', 'f32');
-    K.gemmQkv32 = gemmQkvSource('f32', true, 'gemmQkv32');
-    /* B 系(高批,n ≥ session.batchHi 由 evalBatch 二选一) */
-    K.gemmPlainB = gemmHiSource({ epi: 'plain', name: 'gemmPlainB', wkind: 'i8', ioF16: true });
-    K.gemmResB = gemmHiSource({ epi: 'res', name: 'gemmResB', wkind: 'i8', ioF16: true });
-    K.gemmQkvB = gemmHiSource({ epi: 'plain', name: 'gemmQkvB', wkind: 'i8', ioF16: true, scatter: true });
-    K.gemmPlain32B = gemmHiSource({ epi: 'plain', name: 'gemmPlain32B', wkind: 'f32', ioF16: true });
-    K.gemmBiasRelu32B = gemmHiSource({ epi: 'biasrelu', name: 'gemmBiasRelu32B', wkind: 'f32', ioF16: true });
-    K.gemmRes32B = gemmHiSource({ epi: 'res', name: 'gemmRes32B', wkind: 'f32', ioF16: true });
-    K.gemmQkv32B = gemmHiSource({ epi: 'plain', name: 'gemmQkv32B', wkind: 'f32', ioF16: true, scatter: true });
-  } else if (mode === 'f16w') {
-    /* trunk 权重 f16,f16 io;头部仍 f32 权重(32 变体,f16 io) */
-    K.gemmPlain = gemmQSource('plain', 'gemmPlain', 'f16');
-    K.gemmRes = gemmQSource('res', 'gemmRes', 'f16');
-    K.gemmQkv = gemmQkvSource('f16');
-    K.gemmPlain32 = gemm32Source('plain', 'gemmPlain32');
-    K.gemmBiasRelu32 = gemm32Source('biasrelu', 'gemmBiasRelu32');
-    K.gemmPlainB = gemmHiSource({ epi: 'plain', name: 'gemmPlainB', wkind: 'f16', ioF16: true });
-    K.gemmResB = gemmHiSource({ epi: 'res', name: 'gemmResB', wkind: 'f16', ioF16: true });
-    K.gemmQkvB = gemmHiSource({ epi: 'plain', name: 'gemmQkvB', wkind: 'f16', ioF16: true, scatter: true });
-    K.gemmPlain32B = gemmHiSource({ epi: 'plain', name: 'gemmPlain32B', wkind: 'f32', ioF16: true });
-    K.gemmBiasRelu32B = gemmHiSource({ epi: 'biasrelu', name: 'gemmBiasRelu32B', wkind: 'f32', ioF16: true });
-  } else {
-    K.gemmPlain = gemmSource('plain', 'gemmPlain');
-    K.gemmRes = gemmSource('res', 'gemmRes');
-    K.gemmBiasRelu = gemmSource('biasrelu', 'gemmBiasRelu');
-    K.gemmQkv = gemmQkvSource('f32', false);
-    K.gemmPlainB = gemmHiSource({ epi: 'plain', name: 'gemmPlainB', wkind: 'f32', ioF16: false });
-    K.gemmResB = gemmHiSource({ epi: 'res', name: 'gemmResB', wkind: 'f32', ioF16: false });
-    K.gemmBiasReluB = gemmHiSource({ epi: 'biasrelu', name: 'gemmBiasReluB', wkind: 'f32', ioF16: false });
-    K.gemmQkvB = gemmHiSource({ epi: 'plain', name: 'gemmQkvB', wkind: 'f32', ioF16: false, scatter: true });
-  }
+  /* ---- GEMM 主力(i8f16 装配) ---- */
+  /* trunk 大权重:int8 + scale,f16 io(绑定序:[u, in, W, S, out] / res 时 [u, in, W, S, res, out]) */
+  K.gemmPlain = gemmQSource('plain', 'gemmPlain');
+  K.gemmRes = gemmQSource('res', 'gemmRes');
+  K.gemmQkv = gemmQkvSource('i8');
+  /* f32 权重 + f16 io(被排除张量与头部用) */
+  K.gemmPlain32 = gemm32Source('plain', 'gemmPlain32');
+  K.gemmBiasRelu32 = gemm32Source('biasrelu', 'gemmBiasRelu32');
+  K.gemmRes32 = gemmQSource('res', 'gemmRes32', 'f32');
+  K.gemmQkv32 = gemmQkvSource('f32', 'gemmQkv32');
+  /* B 系(高批,n ≥ session.batchHi 由 evalBatch 二选一) */
+  K.gemmPlainB = gemmHiSource({ epi: 'plain', name: 'gemmPlainB', wkind: 'i8', ioF16: true });
+  K.gemmResB = gemmHiSource({ epi: 'res', name: 'gemmResB', wkind: 'i8', ioF16: true });
+  K.gemmQkvB = gemmHiSource({ epi: 'plain', name: 'gemmQkvB', wkind: 'i8', ioF16: true, scatter: true });
+  K.gemmPlain32B = gemmHiSource({ epi: 'plain', name: 'gemmPlain32B', wkind: 'f32', ioF16: true });
+  K.gemmBiasRelu32B = gemmHiSource({ epi: 'biasrelu', name: 'gemmBiasRelu32B', wkind: 'f32', ioF16: true });
+  K.gemmRes32B = gemmHiSource({ epi: 'res', name: 'gemmRes32B', wkind: 'f32', ioF16: true });
+  K.gemmQkv32B = gemmHiSource({ epi: 'plain', name: 'gemmQkv32B', wkind: 'f32', ioF16: true, scatter: true });
 
-  /* 高批注意力(所有模式同源:io 类型随模式) */
+  /* 高批注意力 */
   K.flashB = flashBSource();
 
   return K;

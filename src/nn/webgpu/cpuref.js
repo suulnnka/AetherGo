@@ -224,13 +224,13 @@ function valueMlp(gp, Wv2, v2b, Wvh, vhb, Wm, mb, n, valOut, miscOut) {
 }
 
 /**
- * 创建 CPU 参考会话:同 evalBatch 契约(rows 可带 sym; optimism 同 ort 路径)。
+ * 创建 CPU 参考会话:同 evalBatch 契约(rows 可带 sym; optimism 同主路径)。
  */
 export function createCpuRefSession(blobBuffer, opt = {}) {
   const parsed = parseAewn(blobBuffer);
   const { meta, w: weights } = parsed;
   assertPlanMeta(meta);
-  /* 压缩 blob 反量化仿真(dtype=1 int8×scale;dtype=2 f16 精确解码),还原成 f32
+  /* 压缩 blob 反量化仿真(dtype=1 int8×scale),还原成 f32
    * 权重再跑同一套 f32 数学 —— 得到「纯权重精度效应」的参照(WGSL 的 f16 激活
    * 舍入另计,由 WGSL vs cpuref 层隔离)。 */
   if (parsed.dtype === 1) {
@@ -247,19 +247,6 @@ export function createCpuRefSession(blobBuffer, opt = {}) {
         const b = (packed[i >> 2] >>> ((i & 3) * 8)) & 0xFF;
         const sv = b >= 128 ? b - 256 : b;
         out[i] = sv * scale[firstAxis ? (i / inner) | 0 : i % O];
-      }
-      weights.set(name, out);
-    }
-  } else if (parsed.dtype === 2) {
-    for (const name of Object.keys(meta.quant ?? {})) {
-      const bits = weights.get(name);
-      const out = new Float32Array(bits.length);
-      for (let i = 0; i < bits.length; i++) {
-        const h = bits[i];
-        const sg = (h & 0x8000) >> 15, e = (h & 0x7c00) >> 10, m = h & 0x03ff;
-        out[i] = e === 0 ? (sg ? -1 : 1) * m * 2 ** -24
-          : e === 31 ? (m ? NaN : (sg ? -Infinity : Infinity))
-            : (sg ? -1 : 1) * (1 + m / 1024) * 2 ** (e - 15);
       }
       weights.set(name, out);
     }
@@ -380,7 +367,7 @@ export function createCpuRefSession(blobBuffer, opt = {}) {
       void EPS; // eps 已在 meta 互验,RMS 内核用 plan 常量(与 f32(1e-6) 一致)
     }
 
-    /* ---- JS 后处理:与 ort 路径(src/nn/session.js)同口径 ---- */
+    /* ---- JS 后处理:契约口径见 src/nn/session.js 文件头 ---- */
     const res = new Array(n);
     for (let i = 0; i < n; i++) {
       const optimism = rows[i].optimism ?? 1.0;

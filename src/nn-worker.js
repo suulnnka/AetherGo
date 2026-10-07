@@ -9,8 +9,8 @@
  *          netScoreLead(黑方目差:网端 lead 头,已含贴目,新模型可用的备选口径),
  *          ownership(黑方视角归属图) }
  *   { type:'load', id, modelUrl }        → { id, type:'loaded', ep } / { id, error }
- *     懒加载:自研引擎 aethernn(src/nn/webgpu/,权重 .aewn)+ WebGPU;
- *     ?engine=ort 切回 onnxruntime-web 逃生舱。不可用时报错,UI 显示原因。
+ *     懒加载:自研引擎 aethernn(src/nn/webgpu/,权重 .aewn,i8 权重 f16 计算)
+ *     + WebGPU;不可用时报错,UI 显示原因(?engine=ort 逃生舱已于 2026-10-08 移除)。
  *   { type:'think', id, moves, level, temperature?, temperatureHalflife? }
  *     → 逐步 { id, type:'progress', visits, move, winRate, ms } → 最终着法
  *     temperature:开局温度,缺省 0(LCB 选点);>0 按访问数^(1/T) 随机抽
@@ -88,7 +88,6 @@ self.onmessage = async (e) => {
     try {
       session = await createSession({
         modelUrl: d.modelUrl,
-        engine: d.engine,                      // 'aewnn'(缺省)| 'ort'(逃生舱)
         onStatus: (s) => self.postMessage({ id: d.id, type: 'status', text: s }),
       });
       self.postMessage({ id: d.id, type: 'loaded', ep: session.ep });

@@ -1,21 +1,18 @@
-/* 测试辅助:确保 .aewn blob 在场(缺失时调 packer 现做)。
+/* 测试辅助:确保 .aewn blob 在场(仅 i8f16 一份;缺失时报错,不再兜底现做
+ * —— 重打包需训练管线产出的 onnx,出库后由本地训练侧自行提供)。
  *
- * 入库两份:.i8.aewn 默认 / .aewn fp32 golden(f16 权重版已撤销清出)。
- * helper 只兜底「本地缺文件」的场景(如新克隆后未跑 packer)。*/
+ * 2026-10-08 拍板:引擎仅支持 i8 权重 + f16 激活;fp32 golden blob 与
+ * onnx 已出库(f16 权重版此前已撤销清出仓库与历史)。 */
 import { existsSync, readFileSync } from 'node:fs';
-import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
 export const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
-export const PY = process.env.PYTHON_BIN ?? '/home/a/miniconda3/envs/bleed/bin/python';
-export const ONNX = join(ROOT, 'models/b8c96h3tfrs_19.onnx');
 
-export function ensureBlob(file, dtypeArgs = []) {
+export function ensureBlob(file) {
   const p = join(ROOT, 'models', file);
   if (!existsSync(p)) {
-    execFileSync(PY, [join(ROOT, 'training/pack_aewn.py'), ONNX, p, '--dtype', dtypeArgs[0] ?? 'f32'],
-      { stdio: 'inherit' });
+    throw new Error(`权重 blob 缺失:${p}(用训练管线产出 onnx 后按 training/pack_aewn.py 重打包)`);
   }
   const b = readFileSync(p);
   return b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength);

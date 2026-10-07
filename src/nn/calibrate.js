@@ -1,9 +1,9 @@
 /* ============================================================
  * AetherGo NN 批大小校准(KataGo benchmark 的加载时自动化)
  *
- * 从 session.js 抽出:ort 路径与自研 aewnn 路径共用同一测速器与同口径
- * 的 maxBatch 语义(吞吐 ≥ 最优 90% 的最小批),天然成为两后端 A/B 的
- * 标准测速器。evalBatch 契约见 src/nn/session.js。
+ * 自研 aewnn 路径的加载时校准:maxBatch 语义 = 吞吐 ≥ 最优 90% 的最小批
+ * (曾同时服务 ort/aewnn 两后端,历史测量记录见 test/browser-ab/results*.json)。
+ * evalBatch 契约见 src/nn/session.js。
  *
  * 2026-10-07 修复(实测复现的三类失真,见 test/browser-ab/results*.json):
  *   1. 冷启动截断乱选:首推理含一次性管线编译(ORT 整图 ~2s),旧版把它
