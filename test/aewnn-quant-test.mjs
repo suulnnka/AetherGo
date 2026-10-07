@@ -14,7 +14,7 @@
  */
 import { spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join } from 'node:path';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -22,10 +22,10 @@ const ROOT = join(HERE, '..');
 const PY = process.env.PYTHON_BIN ?? '/home/a/miniconda3/envs/bleed/bin/python';
 const MODEL = join(ROOT, 'models/b8c96h3tfrs_19.onnx');
 
-const { N, N2, BLACK, WHITE, PASS, newBoard, make } = await import(join(ROOT, 'src/engine.js'));
-const { encodeFeatures } = await import(join(ROOT, 'src/nn/features.js'));
-const { SYM8, permuteSpatial } = await import(join(ROOT, 'src/nn/symmetry.js'));
-const { createCpuRefSession } = await import(join(ROOT, 'src/nn/webgpu/cpuref.js'));
+const { N, N2, BLACK, WHITE, PASS, newBoard, make } = await import(pathToFileURL(join(ROOT, 'src/engine.js')).href);
+const { encodeFeatures } = await import(pathToFileURL(join(ROOT, 'src/nn/features.js')).href);
+const { SYM8, permuteSpatial } = await import(pathToFileURL(join(ROOT, 'src/nn/symmetry.js')).href);
+const { createCpuRefSession } = await import(pathToFileURL(join(ROOT, 'src/nn/webgpu/cpuref.js')).href);
 
 let failed = 0;
 const check = (name, cond, extra) => {
@@ -202,7 +202,7 @@ try { dawn = await import('webgpu'); } catch { /* 跳过 */ }
 if (dawn) {
   Object.assign(globalThis, dawn.globals);
   Object.defineProperty(globalThis, 'navigator', { value: { gpu: dawn.create([]) }, configurable: true });
-  const { createAewnnSession } = await import(join(ROOT, 'src/nn/webgpu/session.js'));
+  const { createAewnnSession } = await import(pathToFileURL(join(ROOT, 'src/nn/webgpu/session.js')).href);
   const gpu = await createAewnnSession({ blob: qBlob, calibrate: false, onStatus: () => {} });
   const rows = CASES.slice(0, 12).map(({ bd, side, moves, sym, optimism }) => {
     const f = encodeFeatures(bd, side, { recentMoves: moves, komi: 7.5 });

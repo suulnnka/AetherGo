@@ -3,16 +3,16 @@
  */
 import { readFileSync, writeFileSync, readdirSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join } from 'node:path';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, '..');
 const PY = process.env.PYTHON_BIN ?? '/home/a/miniconda3/envs/bleed/bin/python';
 
-const { N, N2, BLACK, newBoard } = await import(join(ROOT, 'src/engine.js'));
-const { encodeFeatures } = await import(join(ROOT, 'src/nn/features.js'));
-const { createCpuRefSession } = await import(join(ROOT, 'src/nn/webgpu/cpuref.js'));
+const { N, N2, BLACK, newBoard } = await import(pathToFileURL(join(ROOT, 'src/engine.js')).href);
+const { encodeFeatures } = await import(pathToFileURL(join(ROOT, 'src/nn/features.js')).href);
+const { createCpuRefSession } = await import(pathToFileURL(join(ROOT, 'src/nn/webgpu/cpuref.js')).href);
 
 /* 空盘(sym=0,λ=1):输入确定,分段 diff 从 stem 开始 */
 const bd = newBoard();

@@ -9,7 +9,7 @@
  * 运行:node test/aewnn-bench.mjs
  */
 import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join } from 'node:path';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -18,10 +18,10 @@ const dawn = await import('webgpu');
 Object.assign(globalThis, dawn.globals);
 Object.defineProperty(globalThis, 'navigator', { value: { gpu: dawn.create([]) }, configurable: true });
 
-const { BLACK, newBoard } = await import(join(ROOT, 'src/engine.js'));
-const { encodeFeatures } = await import(join(ROOT, 'src/nn/features.js'));
-const { createAewnnSession } = await import(join(ROOT, 'src/nn/webgpu/session.js'));
-const { pickBatchSizeFromThroughput } = await import(join(ROOT, 'src/nn/session.js'));
+const { BLACK, newBoard } = await import(pathToFileURL(join(ROOT, 'src/engine.js')).href);
+const { encodeFeatures } = await import(pathToFileURL(join(ROOT, 'src/nn/features.js')).href);
+const { createAewnnSession } = await import(pathToFileURL(join(ROOT, 'src/nn/webgpu/session.js')).href);
+const { pickBatchSizeFromThroughput } = await import(pathToFileURL(join(ROOT, 'src/nn/session.js')).href);
 
 const { ensureBlob } = await import('./blob-helper.mjs');
 const blob = ensureBlob('b8c96h3tfrs_19.aewn', ['f32']);

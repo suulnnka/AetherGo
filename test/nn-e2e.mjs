@@ -4,7 +4,7 @@
  * (UCT 引擎已移除;NN vs NN 对战用 test/nn-match.mjs)
  */
 import { spawn } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join } from 'node:path';
 import { readFileSync } from 'node:fs';
 
@@ -14,8 +14,8 @@ const model = process.argv[2] ?? join(ROOT, 'models', 'b8c96h3tfrs_19.onnx');
 const blackVisits = Number(process.argv[3] ?? 24);
 const whiteVisits = Number(process.argv[4] ?? 48);
 
-const E = await import(join(ROOT, 'src/engine.js'));
-const { nnSearchBest } = await import(join(ROOT, 'src/nn/search.js'));
+const E = await import(pathToFileURL(join(ROOT, 'src/engine.js')).href);
+const { nnSearchBest } = await import(pathToFileURL(join(ROOT, 'src/nn/search.js')).href);
 
 const PY = '/home/a/miniconda3/envs/bleed/bin/python';
 const proc = spawn(PY, [join(ROOT, 'training/ort_server.py'), model], { stdio: ['pipe', 'pipe', 'inherit'] });

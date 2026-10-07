@@ -337,7 +337,7 @@ export function createCpuRefSession(blobBuffer, opt = {}) {
         scan('attn', attn);
         gemm(attn, w.get(`attn${b}.out`), i, C_TRUNK, C_TRUNK, proj, 'res', trunk);
         [trunk, proj] = [proj, trunk];
-        snap(`resA${b}`, trunk);
+        if (i === 0) snap(`resA${b}`, trunk);
         if (i === 0 && b === 0) snap('res0', trunk);
 
         rmsNorm(trunk, w.get(`ffn${b}.norm`), i, normed);
@@ -349,7 +349,7 @@ export function createCpuRefSession(blobBuffer, opt = {}) {
         scan('hidden', hidden);
         gemm(hidden, w.get(`ffn${b}.ffn2`), i, FFN, C_TRUNK, proj, 'res', trunk);
         [trunk, proj] = [proj, trunk];
-        snap(`resB${b}`, trunk);
+        if (i === 0) snap(`resB${b}`, trunk);
         if (i === 0 && b === 0) snap('res1', trunk);
       }
 

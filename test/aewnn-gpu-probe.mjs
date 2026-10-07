@@ -3,7 +3,7 @@
  * 运行:node test/aewnn-gpu-probe.mjs
  */
 import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join } from 'node:path';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -16,10 +16,10 @@ Object.defineProperty(globalThis, 'navigator', { value: { gpu: create([]) }, con
 globalThis.GPUBufferUsage = globals.GPUBufferUsage;
 globalThis.GPUMapMode = globals.GPUMapMode;
 
-const { N, BLACK, WHITE, newBoard, make } = await import(join(ROOT, 'src/engine.js'));
-const { encodeFeatures } = await import(join(ROOT, 'src/nn/features.js'));
-const { createCpuRefSession } = await import(join(ROOT, 'src/nn/webgpu/cpuref.js'));
-const { createAewnnSession } = await import(join(ROOT, 'src/nn/webgpu/session.js'));
+const { N, BLACK, WHITE, newBoard, make } = await import(pathToFileURL(join(ROOT, 'src/engine.js')).href);
+const { encodeFeatures } = await import(pathToFileURL(join(ROOT, 'src/nn/features.js')).href);
+const { createCpuRefSession } = await import(pathToFileURL(join(ROOT, 'src/nn/webgpu/cpuref.js')).href);
+const { createAewnnSession } = await import(pathToFileURL(join(ROOT, 'src/nn/webgpu/session.js')).href);
 
 import { ensureBlob } from './blob-helper.mjs';
 const blob = ensureBlob('b8c96h3tfrs_19.aewn', ['f32']);
@@ -47,7 +47,7 @@ await Promise.all([cpu.evalBatch(rows2), gpu.evalBatch(rows2)]);
 /* GPU 中间缓冲拷回:trunk(A: stem 后)/normed/qkv/qh/attn/gate/hidden/gp/pol/pass/val/misc/own */
 const HW = 361, C = 96, dev = gpu.__buffers;
 const buf = (await import('node:fs'), null);
-const device = (await import(join(ROOT, 'src/nn/webgpu/session.js')), null);
+const device = (await import(pathToFileURL(join(ROOT, 'src/nn/webgpu/session.js')).href), null);
 void buf; void device;
 
 /* 通过 session 内部 device 不可达 —— 改用一次独立 evalBatch 后无法拷贝,
@@ -90,8 +90,13 @@ const dumps2 = await gpu.__debugCopy([
 ], [row]);
 Object.assign(dumps, dumps2);
 
-/* 行 1 单独跑 cpu,得到行 1 参照 */
+/* 行 1 单独跑 cpu,得到行 1 参照 —— 注意 cpuref 的 __debug 快照是「最后一次
+ * evalBatch 的 i=0 行」,重演会覆盖,故行 0 参照必须先收割留存 */
+const ref0 = {};
+for (const k of dbgNames) if (cpu.__debug[k]) ref0[k] = cpu.__debug[k];
 await cpu.evalBatch([rows2[1]]);
+const ref1 = {};
+for (const k of dbgNames) if (cpu.__debug[k]) ref1[k] = cpu.__debug[k];
 console.log('uniform stem 槽(words):', Array.from(dumps.unif ?? []));
 const CMP = {
   stem: 'stem', norm0: 'norm0', qrope0: 'qrope0', attn0: 'attn0', resA0: 'res0', resB0: 'res1',
@@ -99,14 +104,12 @@ const CMP = {
 for (let b = 1; b < 8; b++) { CMP[`resA${b}`] = `resA${b}`; CMP[`resB${b}`] = `resB${b}`; }
 Object.assign(CMP, { trunkfinal: 'trunkfinal', p1: 'p1', actg: 'actg', gpp: 'gpp', v1: 'v1', gpv: 'gpv' });
 const ROW1 = process.argv[3] === 'r1';
+const REF = ROW1 ? ref1 : ref0;
 for (const [gname, cname] of Object.entries(CMP)) {
   const g = ROW1 ? dumps[gname + '_r1'] : dumps[gname];
   if (!g) continue;
-  const c = cname ? cpu.__debug[cname] : null;
+  const c = cname ? REF[cname] : null;
   if (!c) continue;
-  {
-    /* 行 1(不同 sym)也比对:cpu 对应行 = 第二次 eval?此处先只比行 0 */
-  }
   let mx = 0, idx = -1;
   for (let i = 0; i < Math.min(g.length, c.length); i++) {
     const d = Math.abs(g[i] - c[i]);
@@ -119,11 +122,11 @@ for (const [gname, cname] of Object.entries(CMP)) {
   console.log(`gpu spatial 非零数: ${nz} / 7942(期望 = ch0 的 361 + 其它)`);
   console.log('gpu spatial[0..6]:', Array.from(dumps.spatialIn.slice(0, 7)));
   console.log('gpu trunk[0..6]:', Array.from(dumps.stem.slice(0, 7)));
-  console.log('cpu stem[0..6]:', Array.from(cpu.__debug.stem.slice(0, 7)));
+  console.log('cpu stem[0..6]:', Array.from(REF.stem.slice(0, 7)));
 }
 console.log('expect ch0 ones:', Array.from(f.spatial.slice(0, 6)), ' ch1:', Array.from(f.spatial.slice(361, 367)));
 {
-  const g = dumps.attn0, c = cpu.__debug.attn0;
+  const g = dumps.attn0, c = REF.attn0;
   for (const [tag, arr] of [['gpu', g], ['cpu', c]]) {
     let line = '';
     for (let h = 0; h < 3; h++) {

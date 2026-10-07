@@ -2,7 +2,7 @@
  * 用法:node test/nn-match.mjs <modelA.onnx> <modelB.onnx> [局数] [visits]
  */
 import { spawn } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join } from 'node:path';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -13,8 +13,8 @@ const modelB = process.argv[3] ?? join(ROOT, 'models/b8c96h3tfrs_19.onnx');
 const GAMES = Number(process.argv[4] ?? 4);
 const VISITS = Number(process.argv[5] ?? 150);
 
-const E = await import(join(ROOT, 'src/engine.js'));
-const S = await import(join(ROOT, 'src/nn/search.js'));
+const E = await import(pathToFileURL(join(ROOT, 'src/engine.js')).href);
+const S = await import(pathToFileURL(join(ROOT, 'src/nn/search.js')).href);
 const PY = '/home/a/miniconda3/envs/bleed/bin/python';
 
 function makeSession(model) {
