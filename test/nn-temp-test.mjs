@@ -6,6 +6,11 @@
  *   C. 温度 0.15 = 大概率 argmax,偶尔第二名
  *   D. 抽样分布与 KataGo chooseIndexWithTemperature(onlyBelowProb=1)同分布:
  *      P_i ∝ (v_i/v_max)^(1/T)
+ *
+ * 本测试是「位置敏感桩测试」(断言具体点号 40/41/42):引擎 2026-10-06 起每次
+ * 评估随机取 8 对称之一去相关(search.js opt.symmetry 文档口径),sym 盲桩会在
+ * 逆置换后把固定 policy 打散到旋转位置 —— 故必须显式 symmetry: false
+ * (等变性本身由 katago-align-test 11a 的 symStub 专项覆盖)。
  */
 import { N2, newBoard, PASS } from '../src/engine.js';
 import { nnSearchBest } from '../src/nn/search.js';
@@ -28,7 +33,7 @@ function makeStubSession() {
 async function search(opts) {
   return nnSearchBest(newBoard(), 0, {
     session: makeStubSession(), visits: 120, batch: 4, reuseTree: false,
-    allowResign: false, ...opts,
+    allowResign: false, symmetry: false, ...opts,
   });
 }
 
