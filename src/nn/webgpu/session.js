@@ -20,10 +20,10 @@ import {
   NUM_BLOCKS, SPATIAL_C, GLOBAL_C, HEAD_C, ATTN_SCALE, RMS_EPS,
   parseAewn, assertPlanMeta, makeStemTables,
 } from './plan.js';
-import { buildKernels } from './kernels.js';
+import { buildKernels, HI_R } from './kernels.js';
 import { calibrateMaxBatch } from '../calibrate.js';
 
-const CAP = 32;                       // 缓冲容量(= 校准最大档;搜索 maxBatch ≤ CAP)
+const CAP = 64;                       // 缓冲容量(= 校准/扫描最大档 64;搜索 maxBatch ≤ CAP)
 const SLOT = 256;                     // uniform 槽步长(minUniformBufferOffsetAlignment)
 const WORDS = SLOT / 4;
 
@@ -48,7 +48,8 @@ export async function createAewnnSession(opt) {
   if (adapter.limits.maxStorageBuffersPerShaderStage > 8) {
     reqLimits.maxStorageBuffersPerShaderStage = Math.min(9, adapter.limits.maxStorageBuffersPerShaderStage);
   }
-  /* 量化版(i8f16)的 f16 激活存储需要 shader-f16;适配器不支持则回落 f32 blob。 */
+  /* 量化版(i8f16)的 f16 激活存储需要 shader-f16;适配器不支持则回落 f32 blob。
+   * (2026-10-07:flashB 为唯一注意力算子,线程级实现,无需 subgroups 特性。) */
   const f16ok = adapter.features.has('shader-f16');
   const requiredFeatures = f16ok ? ['shader-f16'] : [];
   const device = await adapter.requestDevice({ requiredLimits: reqLimits, requiredFeatures });
@@ -172,6 +173,16 @@ export async function createAewnnSession(opt) {
       params: { n: 0, ...params },
     });
   }
+  /* B 系双注册:同一逻辑 GEMM 注册低批(z=n)+ 高批(z=ceil(n/HI_R))两条相邻
+   * dispatch,evalBatch 按 n ≥ batchHi 二选一(位置序不变,数据依赖保持)。
+   * hi 旗标 undefined 的 dispatch(非 GEMM)恒跑。 */
+  const BATCH_HI = opt.batchHi ?? 8;
+  function addGemm(pipeKey, params, entries, x, y) {
+    add(pipeKey, params, entries, (n) => [x, y, n]);
+    dispatches[dispatches.length - 1].hi = false;
+    add(`${pipeKey}B`, params, entries, (n) => [x, y, Math.ceil(n / HI_R)]);
+    dispatches[dispatches.length - 1].hi = true;
+  }
   const elm = { n: 0 };
   const g2 = (k, o) => ({ n: 0, k, o });
 
@@ -191,49 +202,52 @@ export async function createAewnnSession(opt) {
     add('rms', elm, ['U', B('trunk'), W(`attn${b}.norm`), B('normed')],
       (n) => [Math.ceil(n * HW / 64)]);
     const qkvQ = MODE === 'q' && (meta.quant ?? {})[`attn${b}.qkv`];
-    add(pickKey('gemmQkv', 'gemmQkv', qkvQ), g2(C_TRUNK, QKV_FUSED),
+    addGemm(pickKey('gemmQkv', 'gemmQkv', qkvQ), g2(C_TRUNK, QKV_FUSED),
       qkvQ ? [...['U', B('normed'), W(`attn${b}.qkv`), B('qh'), B('kh'), B('vh')], Ws(`attn${b}.qkv.s`)]
         : ['U', B('normed'), W(`attn${b}.qkv`), B('qh'), B('kh'), B('vh')],
-      (n) => [Math.ceil(QKV_FUSED / 16), Math.ceil(HW / 16), n]);
+      Math.ceil(QKV_FUSED / 16), Math.ceil(HW / 16));
     add('rope', elm, ['U', B('qh'), B('kh'), { buffer: ropeCos }, { buffer: ropeSin }],
       (n) => [Math.ceil(n * NUM_HEADS * HW * (HEAD_DIM / 2) / 64)]);
-    add('flash', elm, ['U', B('qh'), B('kh'), B('vh'), B('attn')],
+    /* 注意力:flashB 唯一算子(线程=query,64 线程/组;32 维点积拆 4 路部分和
+     * 打断依赖链)。2026-10-07 旧 flash 算子与低/高批双派发移除 —— flashB
+     * 全批次恒跑:低批实测与旧算子持平(批1/4 1.00x),高批吞吐 ×2~3。 */
+    add('flashB', elm, ['U', B('qh'), B('kh'), B('vh'), B('attn')],
       (n) => [Math.ceil(n * NUM_HEADS * HW / 64)]);
     /* gemmRes 绑定序:[uniform, in, W, out, res](out=新残差载体,res=块输入) */
     /* gemmRes 绑定序:i8 [u,in,W,S,res,out];f32 [u,in,W,out,res](out=新残差载体,res=块输入) */
     const outQ = MODE === 'q' && (meta.quant ?? {})[`attn${b}.out`];
-    add(pickKey('gemmRes', 'gemmRes', outQ), g2(C_TRUNK, C_TRUNK),
+    addGemm(pickKey('gemmRes', 'gemmRes', outQ), g2(C_TRUNK, C_TRUNK),
       outQ ? ['U', B('attn'), W(`attn${b}.out`), Ws(`attn${b}.out.s`), B('trunk'), B('proj')]
         : ['U', B('attn'), W(`attn${b}.out`), B('proj'), B('trunk')],
-      (n) => [Math.ceil(C_TRUNK / 16), Math.ceil(HW / 16), n]);
+      Math.ceil(C_TRUNK / 16), Math.ceil(HW / 16));
 
     /* PyTorch TransformerFFNBlock(ffn{b}):norm → gate SwiGLU → ffn2 → 残差 */
     add('rms', elm, ['U', B('proj'), W(`ffn${b}.norm`), B('normed')],
       (n) => [Math.ceil(n * HW / 64)]);
     const gateQ = MODE === 'q' && (meta.quant ?? {})[`ffn${b}.gate`];
-    add(pickKey('gemmPlain', 'gemmPlain', gateQ), g2(C_TRUNK, FFN_FUSED),
+    addGemm(pickKey('gemmPlain', 'gemmPlain', gateQ), g2(C_TRUNK, FFN_FUSED),
       gateQ ? ['U', B('normed'), W(`ffn${b}.gate`), Ws(`ffn${b}.gate.s`), B('gate')]
         : ['U', B('normed'), W(`ffn${b}.gate`), B('gate')],
-      (n) => [Math.ceil(FFN_FUSED / 16), Math.ceil(HW / 16), n]);
+      Math.ceil(FFN_FUSED / 16), Math.ceil(HW / 16));
     add('swiglu', elm, ['U', B('gate'), B('hidden')],
-      (n) => [Math.ceil(n * HW * FFN / 64)]);
+      (n) => [Math.ceil(n * HW * FFN / 256)]);
     const f2Q = MODE === 'q' && (meta.quant ?? {})[`ffn${b}.ffn2`];
-    add(pickKey('gemmRes', 'gemmRes', f2Q), g2(FFN, C_TRUNK),
+    addGemm(pickKey('gemmRes', 'gemmRes', f2Q), g2(FFN, C_TRUNK),
       f2Q
         ? ['U', B('hidden'), W(`ffn${b}.ffn2`), Ws(`ffn${b}.ffn2.s`), B('proj'), B('trunk')]
         : ['U', B('hidden'), W(`ffn${b}.ffn2`), B('trunk'), B('proj')],
-      (n) => [Math.ceil(C_TRUNK / 16), Math.ceil(HW / 16), n]);
+      Math.ceil(C_TRUNK / 16), Math.ceil(HW / 16));
   }
 
   add('trunkFinal', elm, ['U', B('trunk'), W('trunkfinal.scale'), W('trunkfinal.bias'), B('normed')],
     (n) => [Math.ceil(n * HW * C_TRUNK / 64)]);
 
   /* PolicyHead */
-  add(MODE !== 'f32' ? 'gemmPlain32' : 'gemmPlain', g2(C_TRUNK, HEAD_C), ['U', B('normed'), W('policy.conv1p'), B('p1')],
-    (n) => [Math.ceil(HEAD_C / 16), Math.ceil(HW / 16), n]);
-  add(MODE !== 'f32' ? 'gemmBiasRelu32' : 'gemmBiasRelu', g2(C_TRUNK, HEAD_C),
+  addGemm(MODE !== 'f32' ? 'gemmPlain32' : 'gemmPlain', g2(C_TRUNK, HEAD_C), ['U', B('normed'), W('policy.conv1p'), B('p1')],
+    Math.ceil(HEAD_C / 16), Math.ceil(HW / 16));
+  addGemm(MODE !== 'f32' ? 'gemmBiasRelu32' : 'gemmBiasRelu', g2(C_TRUNK, HEAD_C),
     ['U', B('normed'), W('policy.conv1g'), B('actg'), W('policy.conv1g_b')],
-    (n) => [Math.ceil(HEAD_C / 16), Math.ceil(HW / 16), n]);
+    Math.ceil(HEAD_C / 16), Math.ceil(HW / 16));
   add('poolPolicy', elm, ['U', B('actg'), B('gp')], (n) => [n]);
   add('ling', elm, ['U', B('p1'), B('gp'), W('policy.gp_ling'),
     W('policy.bias2_scale'), W('policy.bias2_bias'), B('act2')], (n) => [n]);
@@ -243,9 +257,9 @@ export async function createAewnnSession(opt) {
     W('policy.pass2'), B('pass')], () => [1]);
 
   /* ValueHead */
-  add(MODE !== 'f32' ? 'gemmBiasRelu32' : 'gemmBiasRelu', g2(C_TRUNK, HEAD_C),
+  addGemm(MODE !== 'f32' ? 'gemmBiasRelu32' : 'gemmBiasRelu', g2(C_TRUNK, HEAD_C),
     ['U', B('normed'), W('value.conv1'), B('v1'), W('value.conv1_b')],
-    (n) => [Math.ceil(HEAD_C / 16), Math.ceil(HW / 16), n]);
+    Math.ceil(HEAD_C / 16), Math.ceil(HW / 16));
   add('poolValue', elm, ['U', B('v1'), B('gp')], (n) => [n]);
   add('valueMlp', elm, ['U', B('gp'), W('value.v2'), W('value.v2_b'),
     W('value.vh'), W('value.vh_b'), W('value.misc'), W('value.misc_b'),
@@ -257,10 +271,11 @@ export async function createAewnnSession(opt) {
    * 字段布局与 WGSL struct 对齐:slot+0 = n(每批补丁);gemm 族 slot+1 = k、
    * slot+2 = o;stem slot+1 = zeroSlot。其余内核只读 n。 */
   const params = new Uint32Array(dispatches.length * WORDS);
+  const GEMM_KEYS = MODE === 'f32'
+    ? ['gemmPlain', 'gemmRes', 'gemmBiasRelu', 'gemmQkv', 'gemmSmall']
+    : ['gemmPlain', 'gemmRes', 'gemmQkv', 'gemmSmall', 'gemmPlain32', 'gemmBiasRelu32', 'gemmRes32', 'gemmQkv32'];
   for (const d of dispatches) {
-    const isGemm = MODE === 'f32'
-      ? ['gemmPlain', 'gemmRes', 'gemmBiasRelu', 'gemmQkv', 'gemmSmall'].some((k) => d.pipe === pipes[k])
-      : ['gemmPlain', 'gemmRes', 'gemmQkv', 'gemmSmall', 'gemmPlain32', 'gemmBiasRelu32', 'gemmRes32', 'gemmQkv32'].some((k) => d.pipe === pipes[k]);
+    const isGemm = GEMM_KEYS.some((k) => d.pipe === pipes[k] || d.pipe === pipes[`${k}B`]);
     if (isGemm) {
       params[d.slot + 1] = d.params.k;
       params[d.slot + 2] = d.params.o;
@@ -320,7 +335,9 @@ export async function createAewnnSession(opt) {
 
       const enc = device.createCommandEncoder();
       const pass = enc.beginComputePass();
+      const useHi = n >= BATCH_HI;
       for (const d of dispatches) {
+        if (d.hi !== undefined && d.hi !== useHi) continue;   // GEMM 低/高批二选一
         pass.setPipeline(d.pipe);
         pass.setBindGroup(0, d.bg);
         const [x, y, z] = d.wg(n);
@@ -454,6 +471,7 @@ export async function createAewnnSession(opt) {
     ep: 'webgpu-aewnn',
     evalBatch,
     maxBatch,
+    batchHi: BATCH_HI,
     meta,
     dispatchCount: dispatches.length,
     __debugCopy,

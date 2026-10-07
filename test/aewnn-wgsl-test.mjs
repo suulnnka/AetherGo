@@ -9,7 +9,7 @@
  *   npm install --no-save webgpu  # Dawn 预编译二进制,仅测试用)
  */
 import { existsSync, readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join } from 'node:path';
 import { createRequire } from 'node:module';
 
@@ -29,11 +29,11 @@ const { create, globals } = dawn;
 Object.assign(globalThis, globals);
 Object.defineProperty(globalThis, 'navigator', { value: { gpu: create([]) }, configurable: true });
 
-const { N, N2, BLACK, WHITE, PASS, newBoard, make } = await import(join(ROOT, 'src/engine.js'));
-const { encodeFeatures } = await import(join(ROOT, 'src/nn/features.js'));
-const { SYM8 } = await import(join(ROOT, 'src/nn/symmetry.js'));
-const { createCpuRefSession } = await import(join(ROOT, 'src/nn/webgpu/cpuref.js'));
-const { createAewnnSession } = await import(join(ROOT, 'src/nn/webgpu/session.js'));
+const { N, N2, BLACK, WHITE, PASS, newBoard, make } = await import(pathToFileURL(join(ROOT, 'src/engine.js')).href);
+const { encodeFeatures } = await import(pathToFileURL(join(ROOT, 'src/nn/features.js')).href);
+const { SYM8 } = await import(pathToFileURL(join(ROOT, 'src/nn/symmetry.js')).href);
+const { createCpuRefSession } = await import(pathToFileURL(join(ROOT, 'src/nn/webgpu/cpuref.js')).href);
+const { createAewnnSession } = await import(pathToFileURL(join(ROOT, 'src/nn/webgpu/session.js')).href);
 
 let failed = 0;
 const check = (name, cond, extra) => {
@@ -110,6 +110,44 @@ rows.forEach((r, i) => {
 });
 console.log(`WGSL vs cpuref 最差偏差: policy=${worst.policy.toExponential(2)} winLoss=${worst.winLoss.toExponential(2)} ownership=${worst.ownership.toExponential(2)}`);
 console.log(`dispatches: ${gpu.dispatchCount}`);
+
+/* ==================== B 系(高批)路径 ====================
+ * 同一输入:低批(n<8,原内核)与高批(n≥8,B 系)必须各自对拍 cpuref 同容差。
+ * GEMM B 系累加序与低批一致;flashB(subgroup 归并)重排累加序 → 交叉比对按
+ * 与 cpuref 相同容差判定(非逐位)。边界批(末 workgroup 不满 R 行)不越界。 */
+{
+  const diffRow = (a, b) => {
+    let d = 0;
+    for (let p = 0; p < N2; p++) {
+      d = Math.max(d, Math.abs(a.policy[p] - b.policy[p]), Math.abs(a.ownership[p] - b.ownership[p]));
+    }
+    return Math.max(d, Math.abs(a.winLoss - b.winLoss), Math.abs(a.policyPass - b.policyPass),
+      Math.abs(a.scoreLead - b.scoreLead), Math.abs(a.scoreMean - b.scoreMean));
+  };
+
+  /* 低批路径回归:n=4(原内核)对拍 cpuref */
+  const lowOut = await gpu.evalBatch(inRows.slice(0, 4));
+  let lowWorst = 0;
+  for (let i = 0; i < 4; i++) lowWorst = Math.max(lowWorst, diffRow(cpuOut[i], lowOut[i]));
+  check(`B系 低批路径(n=4)对拍 cpuref`, lowWorst < TOL.policy, `max|Δ|=${lowWorst.toExponential(2)}`);
+
+  /* 12 行各自单行评估(n=1,低路径)作为交叉基准 */
+  const low1 = [];
+  for (const r of inRows) low1.push((await gpu.evalBatch([r]))[0]);
+
+  /* 高批:整 R(8)/末组 1 行(9)/跨组(15)/整批倍数(16)/近 CAP(31)/CAP(32) */
+  for (const n of [8, 9, 15, 16, 31, 32]) {
+    const rowsN = Array.from({ length: n }, (_, i) => inRows[i % inRows.length]);
+    const [cpuN, gpuN] = await Promise.all([cpu.evalBatch(rowsN), gpu.evalBatch(rowsN)]);
+    let worstCpu = 0, worstX = 0;
+    for (let i = 0; i < n; i++) {
+      worstCpu = Math.max(worstCpu, diffRow(cpuN[i], gpuN[i]));
+      worstX = Math.max(worstX, diffRow(low1[i % low1.length], gpuN[i]));
+    }
+    check(`B系 n=${n} 对拍 cpuref`, worstCpu < TOL.policy, `max|Δ|=${worstCpu.toExponential(2)}`);
+    check(`B系 n=${n} 与低批一致(容差)`, worstX < TOL.policy, `max|Δ|=${worstX.toExponential(2)}`);
+  }
+}
 
 gpu.dispose();
 void fbufs; void existsSync;
