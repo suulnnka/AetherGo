@@ -197,7 +197,9 @@ GTP 配方全套 + 图搜索均已落地(机制、参数与 C++ 出处见 [NEURA
 - ~~19 路学生模型出炉后经 dumponnx 导出替换浏览器占位模型~~ **完成(2026-10-03)**:
   第 40 份(s68320512)落位 `models/b8c96h3tfrs_19.onnx`,旧占位退役;
 - N3 自对弈强化循环启动(`training/run_n3_loop.sh` + gatekeeper,配置就绪待首代学生);
-- N4 收尾:中端手机实测 + 体积闸门核定。
+- N4 收尾:中端手机实测 + 体积闸门核定;
+- N5 性能线:dispatch 压缩融合方案立档(运行时 84 → 目标 ~65,四项融合 + A/B 开关
+  + 验收闸门):[docs/DISPATCH_FUSION_PLAN.md](docs/DISPATCH_FUSION_PLAN.md)。
 
 ## 不做(拍板)
 
