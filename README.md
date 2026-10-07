@@ -66,7 +66,9 @@ python3 -m http.server 8000     # 打开 http://localhost:8000/
   特征对拍 + KataGo 对齐项 + Worker 冒烟全绿。
 - **下一性能课题**:dispatch 融合已立档(运行时 84 → 目标 ~65,四项融合 + A/B 开关
   + 止损线):[docs/DISPATCH_FUSION_PLAN.md](docs/DISPATCH_FUSION_PLAN.md)。
-  真实浏览器测速场 `test/browser-ab/`(?bench / ?sweep / ?calib / ?vbench / 三后端循环赛)。
+  真实浏览器测速场 `test/browser-ab/`(?bench 批4 微基准 / ?sweep 批1-64 吞吐扫描 /
+  ?calib 校准探针 / ?vbench 1024v 基准;曾有的三后端 6 局循环赛已随 2026-10-08
+  逃生舱收敛移除,其 1:1:1 结论留档)。
 
 ## 产品边界(2026-10-03 拍板;引擎侧条目随实现演进更新,更新处注明日期)
 
@@ -227,7 +229,7 @@ v4.5)+ `src/nn/features.js`(fillRowV7 特征,与 KataGo C++ 逐位对拍通过,�
   不做 kata-analyze 式搜索精化;SGF 属于 WebOS 应用侧;
 - **第三方引擎对接 / 多引擎**:仅一种引擎(自研 aethernn);
 - **非 WebGPU 后端 / 任何降级**:无 WASM / CPU 回退;无 fp32 / f16 权重回退
-  (无 `shader-f16` 即报错;fp16 权重版曾实现,两次拍板撤销并清出历史);
+  (无 `shader-f16` 即报错;fp16 权重版曾实现并一度获准保留,二次拍板撤销并清出历史);
 - **多模型 / 模型热切换 / ONNX 运行时解析 / .bin.gz 解析**:仅内置一个 i8f16 权重包;
   ONNX / .bin.gz 只是训练侧产物与 packer 输入,浏览器不加载、不解析;
 - **非中国规则 / 让子 / 其他盘径**:数目法、encore、button、simple/situational ko、
@@ -313,7 +315,8 @@ node test/nn-temp-test.mjs          # 温度选点分布(LCB / 抽样)
 
 cd test/browser-ab && node server.mjs   # 真实浏览器测速场(COOP/COEP 隔离):harness.html
                                         # ?bench 批4 微基准+64v 搜索 / ?sweep 批1-64 吞吐扫描
-                                        # / ?calib 校准算法探针 / ?vbench 1024v 基准 / 默认三后端循环赛
+                                        # / ?calib 校准算法探针 / ?vbench 1024v 基准
+                                        # (三后端循环赛已随 2026-10-08 收敛移除)
 ```
 
 围棋没有 perft,规则正确性的金标准是**模糊测试**:随机对局 40 局 × 最多 420 手,

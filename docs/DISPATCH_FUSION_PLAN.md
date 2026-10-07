@@ -41,7 +41,8 @@ heads 的 poolPolicy / ling / pass / poolValue / valueMlp 是 5 个单 workgroup
   (workgroup 64→256 那次修复的历史包袱随内核一起消失)。
 - **数值口径**:silu 输入从「f16 舍入后的 gate」变为「GEMM 累加器里的 f32 未舍入
   值」—— 精度持平或略优,f32 模式逐位一致;i8 模式对 f32 golden 的偏差按
-  l3probe 的经验预期在量化噪声内,以实测为准。
+  l3probe 调查链的结论(一次性探针已出库,结论存档于 INT8 报告 §6)预期在
+  量化噪声内,以实测为准。
 - **风险**:低。A 装载每 k-步读 2 列(512 vs 256),tile 内复用后净带宽仍降;
   swiglu 数学(silu 用 f32)必须在装载处保持同一口径。
 
@@ -55,9 +56,11 @@ heads 的 poolPolicy / ling / pass / poolValue / valueMlp 是 5 个单 workgroup
   对比同批 A+C 主流(~80MB)约省一半存储访问 —— 正对 ts-probe 量到的高批
   GEMM 边际。
 - **数值口径**:**有变**。现路径 normed 落过一次 f16 舍入,融合后 GEMM 读未舍入
-  乘积(少一次舍入)。f32 模式不再逐位等同旧版;i8 模式 l3probe2 的「舍入边界
-  混沌」教训在此适用 —— 对拍闸门按量级定(policy Δ ≤ 5e-2 现行口径),不追位。
-  cpuref.js 须同步增融合版分段函数,保持 stage-diff 可比。
+  乘积(少一次舍入)。f32 模式不再逐位等同旧版;i8 模式「舍入边界
+  混沌」教训在此适用(调查链结论存档于 INT8 报告 §6)—— 对拍闸门按量级定
+  (policy Δ ≤ 5e-2 现行口径),不追位。
+  cpuref.js 须同步增融合版分段函数,保持与内核逐算子同构(回归定位时可临时
+  复活分段对拍;常备分段工具 stage-diff 已随 2026-10-08 收敛出库)。
 - **风险**:中。GEMM 族两条路径(基本/B 系)都要出变体;A 装载多一次 buffer 读。
 
 ### F3 RoPE 折进 qkv GEMM 的 epilogue —— 运行时 76→68
@@ -90,11 +93,12 @@ heads 的 poolPolicy / ling / pass / poolValue / valueMlp 是 5 个单 workgroup
 
 - **A/B 开关**:仿 katago-webgpu 的 `NO_*` 模式,每项一个
   `KAE_NO_FUSION_SWIGLU` / `KAE_NO_FUSION_RMS` / `KAE_NO_FUSION_ROPE` 开关
-  (bench/cpuref 路径读 `process.env`,对弈页经既有 query 转发先例进 Worker),
+  (bench/cpuref 路径读 `process.env`;对弈页经 query 参数进 Worker 需新增一条
+  转发 —— 先例 `?engine=ort` 已随 2026-10-08 收敛移除),
   默认开,同一二进制随时关回旧路径对拍归因。
-- **数值闸门**(全绿才准合):wgsl-test(现行 85 项,新增融合 case)、
-  stage-diff 分段对拍、aewnn-quant-test(i8 对 f32 golden 按 l3probe3 对弈级
-  口径)、engine-align-probe / nn-e2e / `npm test` 全绿。
+- **数值闸门**(全绿才准合):wgsl-test(新增融合 case)、
+  aewnn-quant-test 三层(第 2 层 golden 经 QONNX 指路,不在场自动跳过)、
+  `npm test` 全绿。
 - **性能验收**:本机 aewnn-bench 先看 dispatch 数下降(119→111→111→103→100
   静态口径,F2 持平)+ 各档 rows/ms;真机走 browser-ab 测速场既有口径
   (?bench 批4 微基准 / ?sweep 批 1-64 / ?vbench 1024v),与落地前基线同机
