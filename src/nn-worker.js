@@ -31,12 +31,15 @@ const ENGINE_TAG = 'go-engine-nn-v0';
 self.__engineTag = ENGINE_TAG;
 
 export const NN_LEVELS = [
-  { id: 'easy', name: '初级', desc: '80 次 NN 访问', visits: 80 },
-  { id: 'normal', name: '中级', desc: '200 次 NN 访问', visits: 200 },
-  { id: 'hard', name: '高级', desc: '400 次 NN 访问', visits: 400 },
-  { id: 'master', name: '大师', desc: '800 次 NN 访问', visits: 800 },
+  { id: 'beginner', name: '入门', desc: '1 次 NN 访问(模型直出)', visits: 1 },
+  { id: 'easy', name: '初级', desc: '16 次 NN 访问', visits: 16 },
+  { id: 'normal', name: '中级', desc: '64 次 NN 访问', visits: 64 },
+  { id: 'hard', name: '高级', desc: '256 次 NN 访问', visits: 256 },
+  { id: 'master', name: '大师', desc: '1024 次 NN 访问', visits: 1024 },
+  { id: 'grandmaster', name: '宗师', desc: '2048 次 NN 访问', visits: 2048 },
+  { id: 'sage', name: '棋圣', desc: '4096 次 NN 访问', visits: 4096 },
 ];
-export const NN_DEFAULT_LEVEL = 2;
+export const NN_DEFAULT_LEVEL = 3;
 
 let session = null;
 let resignHist = [];                      // 最近 ≤3 手的白方视角 mcts 值(认输判据)
@@ -197,7 +200,7 @@ self.onmessage = async (e) => {
     }),
   });
   /* 认输(GTP 实战配方,C++ play.cpp:白方视角 mcts 值连续 3 手越过 −0.90,
-   * 且手数 ≥ 1+361/5 = 73 —— 前手不认输;访问过少(初级档)不认,防噪声误判。
+   * 且手数 ≥ 1+361/5 = 73 —— 前手不认输;访问过少(入门直出档)不认,防噪声误判。
    * 手数回退(悔棋 / 新局)即作废历史。 */
   {
     if (d.moves.length < resignLastLen) resignHist = [];
@@ -207,7 +210,7 @@ self.onmessage = async (e) => {
     if (resignHist.length > 3) resignHist.shift();
     const MIN_TURN = 73;
     const losing = side === WHITE ? ((v) => v < -0.90) : ((v) => v > 0.90);
-    if (d.moves.length >= MIN_TURN && lv.visits >= 80
+    if (d.moves.length >= MIN_TURN && lv.visits >= 16
       && resignHist.length >= 3 && resignHist.every(losing)) {
       self.postMessage({ id: d.id, resign: true, winRate: r.winRate, ms: Date.now() - t0 });
       return;

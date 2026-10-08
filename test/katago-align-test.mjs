@@ -352,5 +352,43 @@ const search = (bd, opts) => nnSearchBest(bd, BLACK, {
   check('11c 变换特征键命中缓存', r2.cacheHits > 0, `hits=${r2.cacheHits}`);
 }
 
+/* ==================== 12. 直出档(难度 1 访 = 模型直出) ====================
+ * 入门档整局只用 1 访:根评估即全部预算,选点 = 原始策略 argmax,胜率 = 网络直出值;
+ * 树复用/换档残留的旧子树统计一律不参与选点与胜率 —— 否则复用根上第 2 手起
+ * 就不是「直出」。前后节共享节点表,先 clearEvalCache 隔离;桩位置敏感,
+ * symmetry:false 钉死坐标系。 */
+{
+  clearEvalCache();
+  /* 空盘直出:argmax 点 / 恰 1 次推理 / 胜率 = (winLoss+1)/2 */
+  {
+    const bd = newBoard();
+    const s = makeStub({ hot: [[sq(5, 5), 5], [sq(9, 9), 3]] });
+    const r = await nnSearchBest(bd, BLACK, { session: s, visits: 1, symmetry: false, reuseTree: true });
+    check('12a 直出选点 = 策略 argmax', r.move === sq(5, 5), String(r.move));
+    check('12b 恰 1 次推理', s.calls === 1, String(s.calls));
+    check('12c 胜率 = 直出值 (winLoss+1)/2', Math.abs(r.winRate - 0.65) < 1e-9, String(r.winRate));
+  }
+  /* 跨手树复用:高档位残子树(p1 子树 60 访,reply 节点带统计)经 tail 下移成新根,
+   * 直出手仍 = 本次根评估的 argmax(p2),胜率 = 本次直出值,恰 1 次推理 */
+  {
+    const p1 = sq(5, 5), p2 = sq(2, 2), reply = 360 - p1;
+    const bd1 = newBoard();
+    await nnSearchBest(bd1, BLACK, {
+      session: makeStub({ hot: [[p1, 6], [reply, 5], [p2, 5]] }),
+      visits: 60, symmetry: false, reuseTree: true,
+    });
+    const bd2 = newBoard();
+    make(bd2, p1, BLACK); make(bd2, reply, WHITE);
+    const s2 = makeStub({ hot: [[p2, 6], [p1, 3]] });
+    const r2 = await nnSearchBest(bd2, BLACK, {
+      session: s2, visits: 1, symmetry: false, reuseTree: true,
+      recentMoves: [p1, reply],
+    });
+    check('12d 复用根上直出仍本次 argmax', r2.move === p2, String(r2.move));
+    check('12e 直出手恰 1 次推理', s2.calls === 1, String(s2.calls));
+    check('12f 胜率 = 本次直出值 0.65', Math.abs(r2.winRate - 0.65) < 1e-9, String(r2.winRate));
+  }
+}
+
 console.log(failed ? `\n${failed} 项失败` : '\n全部通过');
 process.exit(failed ? 1 : 0);

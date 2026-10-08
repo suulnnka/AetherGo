@@ -385,7 +385,8 @@ function t3cdf(x) {
 }
 
 /**
- * opt: { session, visits, komi = KOMI, recentMoves, onProgress,
+ * opt: { session, visits(≤1 = 模型直出:仅根评估,选点 = 原始策略 argmax),
+ *        komi = KOMI, recentMoves, onProgress,
  *        temperature = 0, temperatureHalflife = 0,
  *        maxBatch(校准批上限;旧 opt.batch 兜底,缺省 4),
  *        reuseTree = true(默认:节点表跨手持久), debug = false }
@@ -922,6 +923,11 @@ export async function nnSearchBest(bd, side, opt = {}) {
 
   let iters = 0, nnCalls = 0;
 
+  /* 预算 1 = 模型直出:上方根评估就是那 1 访,主循环直接跳过 —— 选点 =
+   * 原始策略 argmax(directPolicyMove,树复用带进的旧子树统计一律不看),
+   * 胜率 / 目差 = 根直出值(尾段 rootQ / scoreLead 按 root.nn 口径)。 */
+  if (budget <= 1) iters = 1;
+
   /* ---- 批回传:沿 path 重 make 到叶再展开(展开时盘面在叶上 —— C++
    * runSinglePlayout 全程 board 在叶、playout 末尾才复位,search.cpp:1263/1331)。
    * remake 的 token 与攒批侧存的不同,unmake 必须配对新 token。 ---- */
@@ -1060,21 +1066,27 @@ export async function nnSearchBest(bd, side, opt = {}) {
    * 判据:存在「非对方铁地深处、访问充分、效用/目差不比 pass 差太多」的
    * 盘上着法 → pass 的选择权重清零。 */
   const suppressPass = rootOwnPre && rootShouldKeepFilling(root, rootOwnPre);
-  const move = chooseFinalMove(root, tEff, suppressPass);
+  const move = budget <= 1
+    ? directPolicyMove(root, tEff, suppressPass)
+    : chooseFinalMove(root, tEff, suppressPass);
   const best = pickBest(root);
   /* 根加权胜率:全部子按边分摊权重的效用均值 —— 比旧口径(最佳子 q)
    * 少一层选点乐观偏差,认输判据与 UI 胜率据此不再系统性虚高
-   * (2026-10-05 诊断:落后 35 目时旧口径仍报 ~50%) */
+   * (2026-10-05 诊断:落后 35 目时旧口径仍报 ~50%)。
+   * 直出:根自身评估即胜率(mover 视角;子树统计可能是树复用的旧账)。 */
   let wSum = 0, uSum = 0;
-  for (const ch of root.children ?? []) {
-    const n = ch.node;
-    if (n && n.weight > 0 && n.visits > 0) {
-      const w = n.weight * (ch.edgeVisits / n.visits);
-      wSum += w; uSum += w * (n.util / n.weight);
+  if (budget > 1) {
+    for (const ch of root.children ?? []) {
+      const n = ch.node;
+      if (n && n.weight > 0 && n.visits > 0) {
+        const w = n.weight * (ch.edgeVisits / n.visits);
+        wSum += w; uSum += w * (n.util / n.weight);
+      }
     }
   }
-  const rootQ = wSum > 0 ? uSum / wSum
-    : (best && best.node.weight > 0 ? best.node.util / best.node.weight : 0);
+  const rootQ = budget <= 1 ? (root.nn ? (side === WHITE ? root.nn.wlW : -root.nn.wlW) : 0)
+    : (wSum > 0 ? uSum / wSum
+    : (best && best.node.weight > 0 ? best.node.util / best.node.weight : 0));
   const winRate = (rootQ + 1) / 2;
 
   /* ---- GC:从根标记可达,清扫节点表(KataGo mark-and-sweep) ---- */
@@ -1180,6 +1192,32 @@ function rootShouldKeepFilling(root, ownPre) {
       && (root.side === WHITE ? mW > passM - 0.5 : mW < passM + 0.5)) return true;
   }
   return false;
+}
+
+/* 直出(预算 1):选点 = 原始策略 argmax —— 树复用带进的旧子树统计一律不参与,
+ * pass 守门照常(产品护栏);温度 > 0 时按 prior^(1/T) 抽样(pickMove 同款对数平移)。 */
+function directPolicyMove(root, tEff, suppressPass = false) {
+  const live = (root.children ?? []).filter((ch) =>
+    (ch.prior ?? 0) > 0 && !(suppressPass && ch.move === PASS));
+  if (!live.length) return PASS;
+  let arg = 0;
+  for (let i = 1; i < live.length; i++) if ((live[i].prior ?? 0) > (live[arg].prior ?? 0)) arg = i;
+  if (tEff > 1e-4) {
+    const logMax = Math.log(Math.max(live[arg].prior ?? 0, 1e-30));
+    let sum = 0;
+    const wts = live.map((ch) => {
+      const x = Math.exp((Math.log(Math.max(ch.prior ?? 0, 1e-30)) - logMax) / tEff);
+      sum += x; return x;
+    });
+    if (sum > 0) {
+      let r = Math.random() * sum;
+      for (let i = 0; i < live.length; i++) {
+        r -= wts[i];
+        if (r < 0) { arg = i; break; }
+      }
+    }
+  }
+  return live[arg].move;
 }
 
 function chooseFinalMove(root, tEff, suppressPass = false) {
